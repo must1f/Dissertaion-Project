@@ -1,1 +1,93 @@
+# Virtual Environment
 *.venv
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Data
+data/raw/*
+data/processed/*
+data/parquet/*
+*.csv
+*.parquet
+*.db
+*.sqlite
+!data/.gitkeep
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/parquet/.gitkeep
+
+# Database
+*.sql
+postgres-data/
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+*.key
+secrets/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# PyTorch
+*.pt
+*.pth
+checkpoints/
+wandb/
+lightning_logs/
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Documentation
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# Docker
+docker-compose.override.yml
+
+# Model outputs
+models/saved/
+results/
+outputs/
