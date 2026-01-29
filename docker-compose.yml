@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # TimescaleDB for time-series data
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: pinn-timescaledb
+    environment:
+      POSTGRES_DB: pinn_finance
+      POSTGRES_USER: pinn_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pinn_password_change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - pinn-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pinn_user -d pinn_finance"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Main PINN application
+  pinn-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pinn-app
+    environment:
+      - POSTGRES_HOST=timescaledb
+      - POSTGRES_DB=pinn_finance
+      - POSTGRES_USER=pinn_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pinn_password_change_me}
+      - ALPHA_VANTAGE_API_KEY=${ALPHA_VANTAGE_API_KEY}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./checkpoints:/app/checkpoints
+      - ./logs:/app/logs
+    networks:
+      - pinn-network
+    command: python -m src.training.train
+
+  # Web interface
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pinn-web
+    environment:
+      - POSTGRES_HOST=timescaledb
+      - POSTGRES_DB=pinn_finance
+      - POSTGRES_USER=pinn_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pinn_password_change_me}
+      - FLASK_ENV=development
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+      - "8501:8501"
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./checkpoints:/app/checkpoints
+    networks:
+      - pinn-network
+    command: streamlit run src/web/app.py --server.port=8501 --server.address=0.0.0.0
+
+networks:
+  pinn-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
