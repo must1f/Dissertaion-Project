@@ -56,9 +56,18 @@ class DatabaseManager:
                 bind=self.engine,
             )
 
+            # Initialize schema if needed
+            self.initialize_schema()
+
         except Exception as e:
-            logger.error(f"Failed to connect to database: {e}")
-            raise
+            logger.warning(f"Database connection failed: {e}")
+            logger.info("Will use Parquet files as fallback for data storage")
+            self.engine = None
+            self.SessionLocal = None
+
+    def is_connected(self) -> bool:
+        """Check if database is connected"""
+        return self.engine is not None and self.SessionLocal is not None
 
     @contextmanager
     def get_session(self):
@@ -69,6 +78,9 @@ class DatabaseManager:
             with db.get_session() as session:
                 session.execute(...)
         """
+        if not self.is_connected():
+            raise RuntimeError("Database not connected")
+        
         session = self.SessionLocal()
         try:
             yield session
@@ -128,10 +140,11 @@ class DatabaseManager:
         table_name: str,
         schema: str = "finance",
         if_exists: str = "append",
-        method: str = "multi"
+        method: str = "multi",
+        upsert: bool = True
     ):
         """
-        Write DataFrame to database table
+        Write DataFrame to database table with optional upsert support
 
         Args:
             df: DataFrame to write
@@ -139,55 +152,103 @@ class DatabaseManager:
             schema: Database schema (default: finance)
             if_exists: What to do if table exists ('fail', 'replace', 'append')
             method: Insert method (None, 'multi')
+            upsert: If True, use ON CONFLICT DO UPDATE to handle duplicates (default: True)
         """
         try:
-            df.to_sql(
-                table_name,
-                self.engine,
-                schema=schema,
-                if_exists=if_exists,
-                index=False,
-                method=method,
-                chunksize=1000,
-            )
+            if upsert and table_name in ['stock_prices', 'features']:
+                # Use custom upsert for tables with primary keys
+                self._upsert_dataframe(df, table_name, schema)
+            else:
+                # Standard insert
+                df.to_sql(
+                    table_name,
+                    self.engine,
+                    schema=schema,
+                    if_exists=if_exists,
+                    index=False,
+                    method=method,
+                    chunksize=1000,
+                )
             logger.info(f"Successfully wrote {len(df)} rows to {schema}.{table_name}")
         except Exception as e:
             logger.error(f"Failed to write to {schema}.{table_name}: {e}")
             raise
 
+    def _upsert_dataframe(
+        self,
+        df: pd.DataFrame,
+        table_name: str,
+        schema: str = "finance"
+    ):
+        """
+        Insert or update DataFrame using PostgreSQL ON CONFLICT clause
+
+        Args:
+            df: DataFrame to upsert
+            table_name: Target table name
+            schema: Database schema
+        """
+        if df.empty:
+            return
+
+        # Deduplicate DataFrame based on primary key (time, ticker)
+        # Keep the last occurrence of each (time, ticker) pair
+        df_dedup = df.drop_duplicates(subset=['time', 'ticker'], keep='last')
+
+        if len(df_dedup) < len(df):
+            logger.info(f"Removed {len(df) - len(df_dedup)} duplicate rows before upsert")
+
+        # Prepare values
+        from sqlalchemy import MetaData, Table
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        metadata = MetaData()
+        metadata.reflect(bind=self.engine, schema=schema, only=[table_name])
+        table = Table(table_name, metadata, schema=schema, autoload_with=self.engine)
+
+        # Convert DataFrame to list of dicts
+        records = df_dedup.to_dict('records')
+
+        # Batch insert with ON CONFLICT DO UPDATE
+        with self.engine.begin() as conn:
+            for i in range(0, len(records), 1000):
+                batch = records[i:i+1000]
+
+                # Create insert statement with ON CONFLICT
+                stmt = pg_insert(table).values(batch)
+
+                # Determine update columns (all except primary key)
+                update_cols = {c.name: stmt.excluded[c.name] for c in table.columns if not c.primary_key}
+
+                # Add ON CONFLICT DO UPDATE
+                if update_cols:
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['time', 'ticker'],  # Primary key columns
+                        set_=update_cols
+                    )
+                else:
+                    # If no non-PK columns, just ignore conflicts
+                    stmt = stmt.on_conflict_do_nothing()
+
+                conn.execute(stmt)
+
+        logger.info(f"Upserted {len(df_dedup)} rows to {schema}.{table_name}")
+
     def bulk_insert_stock_prices(self, df: pd.DataFrame):
         """
-        Efficiently bulk insert stock prices using COPY
+        Efficiently insert/update stock prices (handles duplicates)
 
         Args:
             df: DataFrame with columns: time, ticker, open, high, low, close, volume, adjusted_close
         """
-        from io import StringIO
+        if not self.is_connected():
+            logger.warning("Database not connected, skipping bulk insert")
+            return
 
-        # Prepare data
-        buffer = StringIO()
-        df.to_csv(buffer, index=False, header=False)
-        buffer.seek(0)
-
-        # Use raw connection for COPY
-        with self.engine.raw_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.copy_expert(
-                    """
-                    COPY finance.stock_prices (time, ticker, open, high, low, close, volume, adjusted_close)
-                    FROM STDIN WITH CSV
-                    """,
-                    buffer
-                )
-                conn.commit()
-                logger.info(f"Bulk inserted {len(df)} stock price records")
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"Bulk insert failed: {e}")
-                raise
-            finally:
-                cursor.close()
+        # Use the upsert method which handles duplicates
+        logger.info(f"Upserting {len(df)} stock price records...")
+        self._upsert_dataframe(df, 'stock_prices', 'finance')
+        logger.info(f"Stock prices upserted successfully")
 
     def get_stock_prices(
         self,
@@ -204,8 +265,12 @@ class DatabaseManager:
             end_date: End date (ISO format)
 
         Returns:
-            DataFrame with stock prices
+            DataFrame with stock prices (empty if database not connected)
         """
+        if not self.is_connected():
+            logger.debug("Database not connected, returning empty DataFrame")
+            return pd.DataFrame()
+        
         query = "SELECT * FROM finance.stock_prices WHERE 1=1"
         params = {}
 
@@ -260,6 +325,152 @@ class DatabaseManager:
         query += " ORDER BY ticker, time"
 
         return self.read_sql(query, params, parse_dates=["time"])
+
+    def initialize_schema(self):
+        """
+        Initialize database schema if it doesn't exist
+        Creates finance schema and required tables
+        """
+        if not self.is_connected():
+            logger.warning("Database not connected, cannot initialize schema")
+            return False
+
+        try:
+            logger.info("Initializing database schema...")
+
+            with self.get_session() as session:
+                # Create finance schema
+                session.execute(text("CREATE SCHEMA IF NOT EXISTS finance"))
+                logger.info("Schema 'finance' created/verified")
+
+                # Create stock_prices table
+                session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS finance.stock_prices (
+                        time TIMESTAMPTZ NOT NULL,
+                        ticker TEXT NOT NULL,
+                        open DOUBLE PRECISION,
+                        high DOUBLE PRECISION,
+                        low DOUBLE PRECISION,
+                        close DOUBLE PRECISION NOT NULL,
+                        volume BIGINT,
+                        adjusted_close DOUBLE PRECISION,
+                        PRIMARY KEY (time, ticker)
+                    )
+                """))
+                logger.info("Table 'stock_prices' created/verified")
+
+                # Try to create hypertable if TimescaleDB is available
+                try:
+                    session.execute(text("""
+                        SELECT create_hypertable(
+                            'finance.stock_prices',
+                            'time',
+                            if_not_exists => TRUE,
+                            chunk_time_interval => INTERVAL '7 days'
+                        )
+                    """))
+                    logger.info("Hypertable 'stock_prices' created/verified")
+                except Exception as e:
+                    logger.debug(f"Could not create hypertable (may already exist or TimescaleDB not available): {e}")
+
+                # Create indexes
+                session.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_stock_prices_ticker
+                        ON finance.stock_prices (ticker, time DESC)
+                """))
+                session.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_stock_prices_time
+                        ON finance.stock_prices (time DESC)
+                """))
+
+                # Create features table
+                session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS finance.features (
+                        time TIMESTAMPTZ NOT NULL,
+                        ticker TEXT NOT NULL,
+                        close DOUBLE PRECISION,
+                        volume BIGINT,
+                        log_return DOUBLE PRECISION,
+                        simple_return DOUBLE PRECISION,
+                        rolling_volatility_5 DOUBLE PRECISION,
+                        rolling_volatility_20 DOUBLE PRECISION,
+                        rolling_volatility_60 DOUBLE PRECISION,
+                        momentum_5 DOUBLE PRECISION,
+                        momentum_20 DOUBLE PRECISION,
+                        rsi_14 DOUBLE PRECISION,
+                        macd DOUBLE PRECISION,
+                        macd_signal DOUBLE PRECISION,
+                        bollinger_upper DOUBLE PRECISION,
+                        bollinger_lower DOUBLE PRECISION,
+                        atr_14 DOUBLE PRECISION,
+                        PRIMARY KEY (time, ticker)
+                    )
+                """))
+                logger.info("Table 'features' created/verified")
+
+                # Try to create hypertable for features
+                try:
+                    session.execute(text("""
+                        SELECT create_hypertable(
+                            'finance.features',
+                            'time',
+                            if_not_exists => TRUE,
+                            chunk_time_interval => INTERVAL '7 days'
+                        )
+                    """))
+                    logger.info("Hypertable 'features' created/verified")
+                except Exception as e:
+                    logger.debug(f"Could not create hypertable for features: {e}")
+
+                # Create predictions table
+                session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS finance.predictions (
+                        id SERIAL,
+                        time TIMESTAMPTZ NOT NULL,
+                        ticker TEXT NOT NULL,
+                        model_name TEXT NOT NULL,
+                        prediction_horizon INTEGER NOT NULL,
+                        predicted_close DOUBLE PRECISION NOT NULL,
+                        actual_close DOUBLE PRECISION,
+                        prediction_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        confidence_lower DOUBLE PRECISION,
+                        confidence_upper DOUBLE PRECISION,
+                        metadata JSONB,
+                        PRIMARY KEY (id)
+                    )
+                """))
+                logger.info("Table 'predictions' created/verified")
+
+                # Create model_metrics table
+                session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS finance.model_metrics (
+                        id SERIAL PRIMARY KEY,
+                        model_name TEXT NOT NULL,
+                        model_variant TEXT,
+                        training_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        test_mse DOUBLE PRECISION,
+                        test_mae DOUBLE PRECISION,
+                        test_rmse DOUBLE PRECISION,
+                        test_r2 DOUBLE PRECISION,
+                        test_mape DOUBLE PRECISION,
+                        violation_score DOUBLE PRECISION,
+                        epochs INTEGER,
+                        training_time_seconds INTEGER,
+                        data_loss DOUBLE PRECISION,
+                        physics_loss DOUBLE PRECISION,
+                        hyperparameters JSONB,
+                        metadata JSONB
+                    )
+                """))
+                logger.info("Table 'model_metrics' created/verified")
+
+                session.commit()
+                logger.info("✓ Database schema initialization complete")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to initialize schema: {e}")
+            return False
 
     def close(self):
         """Close database connections"""

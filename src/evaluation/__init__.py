@@ -6,6 +6,17 @@ from .metrics import (
     MetricsCalculator
 )
 from .backtester import Backtester, BacktestResults
+from .monte_carlo import (
+    MonteCarloSimulator,
+    MonteCarloResults,
+    compute_var_cvar,
+    monte_carlo_price_path
+)
+from .naive_baselines import (
+    NaiveBaselines,
+    BaselineResults,
+    evaluate_naive_baselines
+)
 
 __all__ = [
     "calculate_metrics",
@@ -13,4 +24,11 @@ __all__ = [
     "MetricsCalculator",
     "Backtester",
     "BacktestResults",
+    "MonteCarloSimulator",
+    "MonteCarloResults",
+    "compute_var_cvar",
+    "monte_carlo_price_path",
+    "NaiveBaselines",
+    "BaselineResults",
+    "evaluate_naive_baselines",
 ]

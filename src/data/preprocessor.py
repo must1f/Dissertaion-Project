@@ -48,6 +48,13 @@ class DataPreprocessor:
             DataFrame with log_return column
         """
         df = df.copy()
+
+        # Flatten MultiIndex columns if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = ['_'.join(col).strip('_') if isinstance(col, tuple) else col
+                         for col in df.columns]
+            logger.info("Flattened MultiIndex columns")
+
         df = df.sort_values(['ticker', 'time'])
 
         # Log returns
@@ -139,16 +146,34 @@ class DataPreprocessor:
             # MACD (Moving Average Convergence Divergence)
             macd = ta.macd(ticker_df['close'])
             if macd is not None:
-                ticker_df['macd'] = macd['MACD_12_26_9']
-                ticker_df['macd_signal'] = macd['MACDs_12_26_9']
-                ticker_df['macd_hist'] = macd['MACDh_12_26_9']
+                # Handle different pandas_ta versions
+                macd_cols = macd.columns.tolist()
+                macd_col = [c for c in macd_cols if c.startswith('MACD_') and not c.startswith(('MACDs_', 'MACDh_'))][0] if any(c.startswith('MACD_') and not c.startswith(('MACDs_', 'MACDh_')) for c in macd_cols) else None
+                signal_col = [c for c in macd_cols if c.startswith('MACDs_')][0] if any(c.startswith('MACDs_') for c in macd_cols) else None
+                hist_col = [c for c in macd_cols if c.startswith('MACDh_')][0] if any(c.startswith('MACDh_') for c in macd_cols) else None
+
+                if macd_col:
+                    ticker_df['macd'] = macd[macd_col]
+                if signal_col:
+                    ticker_df['macd_signal'] = macd[signal_col]
+                if hist_col:
+                    ticker_df['macd_hist'] = macd[hist_col]
 
             # Bollinger Bands
             bbands = ta.bbands(ticker_df['close'], length=20)
             if bbands is not None:
-                ticker_df['bollinger_upper'] = bbands['BBU_20_2.0']
-                ticker_df['bollinger_middle'] = bbands['BBM_20_2.0']
-                ticker_df['bollinger_lower'] = bbands['BBL_20_2.0']
+                # Handle different pandas_ta versions with different column names
+                bb_cols = bbands.columns.tolist()
+                upper_col = [c for c in bb_cols if c.startswith('BBU_')][0] if any(c.startswith('BBU_') for c in bb_cols) else None
+                middle_col = [c for c in bb_cols if c.startswith('BBM_')][0] if any(c.startswith('BBM_') for c in bb_cols) else None
+                lower_col = [c for c in bb_cols if c.startswith('BBL_')][0] if any(c.startswith('BBL_') for c in bb_cols) else None
+
+                if upper_col:
+                    ticker_df['bollinger_upper'] = bbands[upper_col]
+                if middle_col:
+                    ticker_df['bollinger_middle'] = bbands[middle_col]
+                if lower_col:
+                    ticker_df['bollinger_lower'] = bbands[lower_col]
 
             # ATR (Average True Range) - volatility measure
             ticker_df['atr_14'] = ta.atr(
@@ -164,8 +189,15 @@ class DataPreprocessor:
             # Stochastic Oscillator
             stoch = ta.stoch(ticker_df['high'], ticker_df['low'], ticker_df['close'])
             if stoch is not None:
-                ticker_df['stoch_k'] = stoch['STOCHk_14_3_3']
-                ticker_df['stoch_d'] = stoch['STOCHd_14_3_3']
+                # Handle different pandas_ta versions
+                stoch_cols = stoch.columns.tolist()
+                k_col = [c for c in stoch_cols if c.startswith('STOCHk_')][0] if any(c.startswith('STOCHk_') for c in stoch_cols) else None
+                d_col = [c for c in stoch_cols if c.startswith('STOCHd_')][0] if any(c.startswith('STOCHd_') for c in stoch_cols) else None
+
+                if k_col:
+                    ticker_df['stoch_k'] = stoch[k_col]
+                if d_col:
+                    ticker_df['stoch_d'] = stoch[d_col]
 
             results.append(ticker_df)
 
@@ -408,6 +440,12 @@ class DataPreprocessor:
             Processed DataFrame
         """
         logger.info("Starting preprocessing pipeline...")
+
+        # Flatten MultiIndex columns if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = ['_'.join(col).strip('_') if isinstance(col, tuple) else col
+                         for col in df.columns]
+            logger.info("Flattened MultiIndex columns in input DataFrame")
 
         # Calculate returns
         df = self.calculate_returns(df)

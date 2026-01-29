@@ -115,8 +115,7 @@ class Trainer:
             self.optimizer,
             mode='min',
             factor=0.5,
-            patience=5,
-            verbose=True
+            patience=5
         )
 
         # Loss criterion (default MSE, can be overridden)
@@ -132,6 +131,8 @@ class Trainer:
         self.history = {
             'train_loss': [],
             'val_loss': [],
+            'train_data_loss': [],
+            'train_physics_loss': [],
             'learning_rates': [],
             'epochs': []
         }
@@ -192,7 +193,9 @@ class Trainer:
 
                 else:
                     # Standard forward pass
-                    if hasattr(self.model, 'base_model_type') and self.model.base_model_type in ['lstm', 'gru']:
+                    # Check if model returns tuple (LSTM/GRU models return (output, hidden))
+                    model_class_name = self.model.__class__.__name__.lower()
+                    if 'lstm' in model_class_name or 'gru' in model_class_name:
                         predictions, _ = self.model(sequences)
                     else:
                         predictions = self.model(sequences)
@@ -275,7 +278,9 @@ class Trainer:
                         predictions, targets, metadata, enable_physics=enable_physics
                     )
                 else:
-                    if hasattr(self.model, 'base_model_type') and self.model.base_model_type in ['lstm', 'gru']:
+                    # Check if model returns tuple (LSTM/GRU models)
+                    model_class_name = self.model.__class__.__name__.lower()
+                    if 'lstm' in model_class_name or 'gru' in model_class_name:
                         predictions, _ = self.model(sequences)
                     else:
                         predictions = self.model(sequences)
@@ -304,7 +309,8 @@ class Trainer:
         self,
         epochs: Optional[int] = None,
         enable_physics: bool = True,
-        save_best: bool = True
+        save_best: bool = True,
+        model_name: Optional[str] = None
     ) -> Dict:
         """
         Full training loop
@@ -313,6 +319,7 @@ class Trainer:
             epochs: Number of epochs (uses config if None)
             enable_physics: Whether to enable physics losses
             save_best: Whether to save best model checkpoint
+            model_name: Optional model name for checkpoint files (e.g., "pinn_gbm")
 
         Returns:
             Training history dictionary
@@ -348,6 +355,12 @@ class Trainer:
             self.history['learning_rates'].append(current_lr)
             self.history['epochs'].append(epoch)
 
+            # Track separate data and physics losses if available
+            if 'train_data_loss' in train_metrics:
+                self.history['train_data_loss'].append(train_metrics['train_data_loss'])
+            if 'train_physics_loss' in train_metrics:
+                self.history['train_physics_loss'].append(train_metrics['train_physics_loss'])
+
             # Save best model
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -357,7 +370,8 @@ class Trainer:
                     self.save_checkpoint(
                         epoch=epoch,
                         val_loss=val_loss,
-                        is_best=True
+                        is_best=True,
+                        model_name=model_name
                     )
                     logger.info(f"✓ Best model saved (epoch {epoch})")
 
@@ -376,10 +390,16 @@ class Trainer:
         self,
         epoch: int,
         val_loss: float,
-        is_best: bool = False
+        is_best: bool = False,
+        model_name: Optional[str] = None
     ):
         """Save model checkpoint"""
-        checkpoint_dir = self.config.checkpoint_dir
+        # Use models directory for variant-specific checkpoints
+        if model_name:
+            checkpoint_dir = self.config.project_root / 'models'
+        else:
+            checkpoint_dir = self.config.checkpoint_dir
+
         checkpoint_dir.mkdir(exist_ok=True)
 
         checkpoint = {
@@ -393,16 +413,24 @@ class Trainer:
         }
 
         # Save latest
-        latest_path = checkpoint_dir / 'latest.pth'
+        if model_name:
+            latest_path = checkpoint_dir / f'{model_name}_latest.pt'
+        else:
+            latest_path = checkpoint_dir / 'latest.pth'
         torch.save(checkpoint, latest_path)
 
         # Save best
         if is_best:
-            best_path = checkpoint_dir / 'best.pth'
+            if model_name:
+                best_path = checkpoint_dir / f'{model_name}_best.pt'
+                history_path = checkpoint_dir / f'{model_name}_history.json'
+            else:
+                best_path = checkpoint_dir / 'best.pth'
+                history_path = checkpoint_dir / 'history.json'
+
             torch.save(checkpoint, best_path)
 
             # Save history
-            history_path = checkpoint_dir / 'history.json'
             with open(history_path, 'w') as f:
                 json.dump(self.history, f, indent=2)
 
@@ -420,9 +448,12 @@ class Trainer:
         logger.info(f"Checkpoint loaded (epoch {checkpoint['epoch']}, val_loss={checkpoint['val_loss']:.4f})")
 
     @torch.no_grad()
-    def evaluate(self) -> Dict:
+    def evaluate(self, enable_physics: bool = True) -> Dict:
         """
         Evaluate on test set
+
+        Args:
+            enable_physics: Whether to enable physics losses (for PINN models)
 
         Returns:
             Dictionary of test metrics
@@ -438,9 +469,15 @@ class Trainer:
             targets = targets.to(self.device)
 
             # Forward pass
-            if hasattr(self.model, 'base_model_type') and self.model.base_model_type in ['lstm', 'gru']:
+            model_class_name = self.model.__class__.__name__.lower()
+            if 'pinn' in model_class_name:
+                # PINN model
+                predictions = self.model(sequences)
+            elif 'lstm' in model_class_name or 'gru' in model_class_name:
+                # LSTM/GRU models return (output, hidden)
                 predictions, _ = self.model(sequences)
             else:
+                # Other models (Transformer, etc.)
                 predictions = self.model(sequences)
 
             all_predictions.append(predictions.cpu().numpy())

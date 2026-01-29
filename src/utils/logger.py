@@ -68,5 +68,15 @@ def get_logger(name: Optional[str] = None):
     return logger
 
 
-# Initialize logger on import
-setup_logger()
+# Global flag to track if logger has been initialized
+_logger_initialized = False
+
+
+def ensure_logger_initialized():
+    """
+    Ensure logger is initialized exactly once per process
+    """
+    global _logger_initialized
+    if not _logger_initialized:
+        setup_logger()
+        _logger_initialized = True

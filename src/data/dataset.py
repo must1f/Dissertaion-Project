@@ -210,6 +210,12 @@ def create_dataloaders(
     config = get_config()
     batch_size = batch_size or config.training.batch_size
 
+    # Detect MPS (Apple Silicon) and adjust settings to avoid warnings/issues
+    if torch.backends.mps.is_available():
+        logger.info("MPS device detected - setting num_workers=0 and pin_memory=False to avoid multiprocessing issues")
+        num_workers = 0
+        pin_memory = False
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,

@@ -19,10 +19,12 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.utils.config import get_config
-from src.utils.logger import get_logger
+from src.utils.logger import get_logger, ensure_logger_initialized
 from src.data.fetcher import DataFetcher
 from src.evaluation.backtester import BacktestResults
 
+# Ensure logger is initialized before using it
+ensure_logger_initialized()
 logger = get_logger(__name__)
 
 # Page configuration
@@ -252,7 +254,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
         "Go to",
-        ["Home", "Data Explorer", "Model Comparison", "Backtesting", "Live Demo"]
+        ["Home", "All Models Dashboard", "PINN Comparison", "Model Comparison", "Prediction Visualizations", "Data Explorer", "Backtesting", "Live Demo"]
     )
 
     config = load_config()
@@ -262,23 +264,68 @@ def main():
         st.header("Welcome to PINN Financial Forecasting")
 
         st.markdown("""
-        This system combines **Physics-Informed Neural Networks** with financial time series forecasting.
+        This system combines **Physics-Informed Neural Networks (PINNs)** with financial time series forecasting.
 
         ### Key Features:
-        - **Physics Constraints**: Embeds GBM, Black-Scholes, OU, and Langevin dynamics
-        - **Multiple Architectures**: LSTM, GRU, Transformer, and PINN models
-        - **Risk Management**: Stop-loss, take-profit, position sizing
-        - **Comprehensive Evaluation**: Sharpe ratio, max drawdown, win rate, etc.
+        - **8 PINN Variants**: Different physics constraint combinations
+        - **Physics Constraints**: GBM (trend), OU (mean-reversion), Black-Scholes (no-arbitrage)
+        - **Advanced Architectures**: Stacked PINN, Residual PINN with curriculum learning
+        - **Comprehensive Metrics**: Sharpe, Sortino, Calmar, drawdown, profit factor
+        - **Robustness Analysis**: Rolling out-of-sample performance, regime sensitivity
+
+        ### PINN Model Variants:
+
+        **Basic PINN Variants** (Different Physics Constraints):
+        1. **Baseline** - Pure data-driven (no physics)
+        2. **Pure GBM** - Trend-following dynamics
+        3. **Pure OU** - Mean-reversion dynamics
+        4. **Pure Black-Scholes** - No-arbitrage constraint
+        5. **GBM+OU Hybrid** - Combined trend and mean-reversion
+        6. **Global Constraint** - All physics equations combined
+
+        **Advanced PINN Architectures**:
+        7. **StackedPINN** - Physics encoder + parallel LSTM/GRU + curriculum learning
+        8. **ResidualPINN** - Base model + physics-informed correction
+
+        ### Financial Evaluation Metrics:
+        - **Risk-Adjusted**: Sharpe ratio, Sortino ratio
+        - **Capital Preservation**: Max drawdown, drawdown duration, Calmar ratio
+        - **Trading Viability**: Annualized return, profit factor, transaction-cost-adjusted PnL
+        - **Signal Quality**: Directional accuracy, precision/recall, information coefficient
+        - **Robustness**: Rolling window stability, regime sensitivity
 
         ### How It Works:
-        1. **Data Collection**: Fetch S&P 500 data via yfinance
-        2. **Feature Engineering**: Technical indicators (RSI, MACD, Bollinger Bands)
-        3. **Model Training**: Train baseline and PINN models
-        4. **Backtesting**: Test strategies on historical data
-        5. **Evaluation**: Compare performance metrics
+        1. **Data Collection**: Fetch financial data (stocks, indices)
+        2. **Feature Engineering**: Returns, volatility, technical indicators
+        3. **PINN Training**: Combine data loss + physics constraints
+        4. **Curriculum Learning**: Gradually increase physics weights
+        5. **Walk-Forward Validation**: Realistic out-of-sample testing
+        6. **Comprehensive Evaluation**: Financial metrics + stability analysis
 
         ### Navigate using the sidebar to explore different features!
         """)
+
+        # Add PINN variant summary
+        st.markdown("### Quick Comparison")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("""
+            **When to Use Each Variant:**
+            - **Baseline**: No assumptions, maximum flexibility
+            - **GBM**: Trending markets (bull/bear)
+            - **OU**: Range-bound, mean-reverting markets
+            - **Black-Scholes**: Derivative pricing, no-arbitrage
+            """)
+
+        with col2:
+            st.markdown("""
+            **Advanced Models:**
+            - **GBM+OU**: Balanced, general forecasting
+            - **Global**: Maximum physics regularization
+            - **StackedPINN**: Multi-scale features + parallel processing
+            - **ResidualPINN**: Physics-constrained corrections
+            """)
 
         # Show quick stats
         st.subheader("Configuration")
@@ -295,6 +342,104 @@ def main():
         with col3:
             st.metric("Initial Capital", f"${config.trading.initial_capital:,.0f}")
             st.metric("Max Position Size", f"{config.trading.max_position_size*100:.0f}%")
+
+    # ALL MODELS DASHBOARD
+    elif page == "All Models Dashboard":
+        st.header("🤖 All Neural Network Models")
+        st.markdown("### Complete Model Registry with Training Status")
+
+        try:
+            from src.web.all_models_dashboard import AllModelsDashboard
+
+            dashboard = AllModelsDashboard()
+
+            # Sub-navigation
+            section = st.radio(
+                "Select Section",
+                ["Overview", "Model List", "Metrics Comparison"],
+                horizontal=True
+            )
+
+            if section == "Overview":
+                dashboard.render_model_overview()
+
+            elif section == "Model List":
+                dashboard.render_model_list()
+
+            elif section == "Metrics Comparison":
+                dashboard.render_metrics_comparison()
+
+        except Exception as e:
+            st.error(f"Error loading All Models Dashboard: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+    # PINN COMPARISON
+    elif page == "PINN Comparison":
+        st.header("PINN Model Comparison")
+        st.markdown("### Comprehensive Financial Performance Analysis")
+
+        # Load PINN dashboard
+        try:
+            from src.web.pinn_dashboard import PINNDashboard, PINN_VARIANTS
+
+            dashboard = PINNDashboard()
+            all_results = dashboard.load_all_results()
+
+            if not all_results:
+                st.warning("No PINN results found. Please train models first.")
+                st.markdown("""
+                ### Quick Start:
+
+                **Train all 6 PINN physics variants:**
+                ```bash
+                python src/training/train_pinn_variants.py --epochs 100
+                ```
+
+                **Train Stacked PINN (encoder + parallel LSTM/GRU):**
+                ```bash
+                python src/training/train_stacked_pinn.py --model-type stacked --epochs 100
+                ```
+
+                **Train Residual PINN (base + physics correction):**
+                ```bash
+                python src/training/train_stacked_pinn.py --model-type residual --epochs 100
+                ```
+                """)
+            else:
+                st.success(f"✓ Loaded {len(all_results)} PINN models")
+
+                # Display model list
+                st.markdown("### Available Models:")
+                cols = st.columns(4)
+                for i, (key, name) in enumerate(PINN_VARIANTS.items()):
+                    col_idx = i % 4
+                    with cols[col_idx]:
+                        if key in all_results:
+                            st.success(f"✓ {name}")
+                        else:
+                            st.info(f"○ {name}")
+
+                # Tabs for different views
+                tab1, tab2, tab3 = st.tabs([
+                    "📊 Metrics Comparison",
+                    "📈 Rolling Performance",
+                    "📚 Training History"
+                ])
+
+                with tab1:
+                    df = dashboard.render_metrics_comparison(all_results)
+
+                with tab2:
+                    dashboard.render_rolling_performance(all_results)
+
+                with tab3:
+                    dashboard.render_training_history(all_results)
+
+        except Exception as e:
+            st.error(f"Error loading PINN dashboard: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 
     # DATA EXPLORER
     elif page == "Data Explorer":
@@ -368,47 +513,261 @@ def main():
     elif page == "Model Comparison":
         st.header("Model Comparison")
 
-        st.info("Compare performance of different models")
+        st.info("Compare all architectures: Baseline, PINN variants, and advanced models")
 
-        # Load results for all models
-        models = ['lstm', 'gru', 'transformer', 'pinn']
+        # Load results for all models - including all PINN types
+        all_model_types = [
+            'lstm', 'gru', 'transformer',
+            'baseline', 'gbm', 'ou', 'black_scholes', 'gbm_ou', 'global',
+            'stacked', 'residual'
+        ]
+
         results = {}
 
-        for model in models:
+        for model in all_model_types:
             result = load_results(model)
             if result:
                 results[model] = result
 
         if not results:
             st.warning("No model results found. Please train models first.")
-            st.code("python -m src.training.train --model pinn")
+            st.markdown("""
+            ### Training Instructions:
+            ```bash
+            # Train PINN variants
+            python src/training/train_pinn_variants.py --epochs 100
+
+            # Train Stacked/Residual PINN
+            python src/training/train_stacked_pinn.py --model-type stacked
+            ```
+            """)
             return
 
-        # Show comparison table
-        st.subheader("Test Set Performance")
+        st.success(f"✓ Loaded {len(results)} models")
+
+        # Show comprehensive comparison table
+        st.subheader("📊 Comprehensive Performance Comparison")
 
         comparison_data = []
         for model, result in results.items():
-            metrics = result.get('test_metrics', {})
-            comparison_data.append({
+            # Get metrics from different possible locations
+            if 'financial_metrics' in result:
+                metrics = result['financial_metrics']
+            elif 'test_metrics' in result:
+                metrics = result['test_metrics']
+            else:
+                metrics = {}
+
+            row = {
                 'Model': model.upper(),
-                'RMSE': metrics.get('test_rmse', 0),
-                'MAE': metrics.get('test_mae', 0),
-                'MAPE': metrics.get('test_mape', 0),
-                'R²': metrics.get('test_r2', 0),
-                'Dir. Acc.': metrics.get('test_directional_accuracy', 0)
-            })
+
+                # Traditional ML Metrics
+                'RMSE': metrics.get('rmse', metrics.get('test_rmse', np.nan)),
+                'MAE': metrics.get('mae', metrics.get('test_mae', np.nan)),
+                'R²': metrics.get('r2', metrics.get('test_r2', np.nan)),
+
+                # Financial Metrics
+                'Sharpe': metrics.get('sharpe_ratio', np.nan),
+                'Sortino': metrics.get('sortino_ratio', np.nan),
+                'Max DD %': metrics.get('max_drawdown', 0) * 100,
+                'Calmar': metrics.get('calmar_ratio', np.nan),
+                'Annual Ret %': metrics.get('annualized_return', metrics.get('total_return', 0)) * 100,
+                'Dir Acc %': metrics.get('directional_accuracy', metrics.get('test_directional_accuracy', 0)) * 100,
+                'Win Rate %': metrics.get('win_rate', 0) * 100,
+                'Profit Factor': metrics.get('profit_factor', np.nan),
+                'IC': metrics.get('information_coefficient', np.nan)
+            }
+
+            comparison_data.append(row)
 
         df_comparison = pd.DataFrame(comparison_data)
-        st.dataframe(df_comparison.style.highlight_min(subset=['RMSE', 'MAE', 'MAPE'], color='lightgreen')
-                                        .highlight_max(subset=['R²', 'Dir. Acc.'], color='lightgreen'))
+
+        # Create tabs for different metric views
+        tab1, tab2 = st.tabs(["Traditional ML Metrics", "Financial Metrics"])
+
+        with tab1:
+            ml_cols = ['Model', 'RMSE', 'MAE', 'R²', 'Dir Acc %']
+            ml_df = df_comparison[ml_cols].copy()
+
+            styled_df = ml_df.style.highlight_min(
+                subset=['RMSE', 'MAE'],
+                color='lightgreen'
+            ).highlight_max(
+                subset=['R²', 'Dir Acc %'],
+                color='lightgreen'
+            ).format({
+                'RMSE': '{:.6f}',
+                'MAE': '{:.6f}',
+                'R²': '{:.4f}',
+                'Dir Acc %': '{:.2f}%'
+            })
+
+            st.dataframe(styled_df, use_container_width=True)
+
+        with tab2:
+            fin_cols = ['Model', 'Sharpe', 'Sortino', 'Max DD %', 'Calmar',
+                       'Annual Ret %', 'Win Rate %', 'Profit Factor', 'IC']
+            fin_df = df_comparison[fin_cols].copy()
+
+            styled_df = fin_df.style.highlight_max(
+                subset=['Sharpe', 'Sortino', 'Calmar', 'Annual Ret %',
+                       'Win Rate %', 'Profit Factor', 'IC'],
+                color='lightgreen'
+            ).highlight_max(  # Less negative drawdown is better
+                subset=['Max DD %'],
+                color='lightgreen'
+            ).format({
+                'Sharpe': '{:.3f}',
+                'Sortino': '{:.3f}',
+                'Max DD %': '{:.2f}%',
+                'Calmar': '{:.3f}',
+                'Annual Ret %': '{:.2f}%',
+                'Win Rate %': '{:.2f}%',
+                'Profit Factor': '{:.2f}',
+                'IC': '{:.3f}'
+            })
+
+            st.dataframe(styled_df, use_container_width=True)
+
+        # Visualizations
+        st.subheader("📊 Performance Visualizations")
+
+        viz_cols = st.columns(2)
+
+        with viz_cols[0]:
+            # Sharpe ratio comparison
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df_comparison['Model'],
+                y=df_comparison['Sharpe'],
+                marker_color='steelblue'
+            ))
+            fig.add_hline(y=1.0, line_dash="dash", line_color="green",
+                         annotation_text="Sharpe = 1.0 (Good)")
+            fig.update_layout(
+                title='Sharpe Ratio Comparison',
+                xaxis_title='Model',
+                yaxis_title='Sharpe Ratio',
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        with viz_cols[1]:
+            # Directional accuracy
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df_comparison['Model'],
+                y=df_comparison['Dir Acc %'],
+                marker_color='forestgreen'
+            ))
+            fig.add_hline(y=50, line_dash="dash", line_color="red",
+                         annotation_text="50% Random Baseline")
+            fig.update_layout(
+                title='Directional Accuracy',
+                xaxis_title='Model',
+                yaxis_title='Accuracy (%)',
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
         # Plot training history for selected model
+        st.subheader("Training History")
         selected_model = st.selectbox("Select model to view training history", list(results.keys()))
 
         if 'training_history' in results[selected_model]:
             history = results[selected_model]['training_history']
             st.plotly_chart(plot_training_history(history), use_container_width=True)
+        elif 'history' in results[selected_model]:
+            history = results[selected_model]['history']
+            st.plotly_chart(plot_training_history(history), use_container_width=True)
+        else:
+            st.info("Training history not available for this model")
+
+    # PREDICTION VISUALIZATIONS
+    elif page == "Prediction Visualizations":
+        st.header("📊 Model Prediction Analysis")
+
+        st.markdown("""
+        This dashboard visualizes how models predict financial returns and react to historical data.
+
+        **Key Visualizations:**
+        - **Predictions vs Actuals**: Time series showing prediction accuracy and strategy performance
+        - **Scatter Analysis**: Correlation between predicted and actual returns
+        - **Distribution Analysis**: Statistical properties of predictions vs market returns
+        - **Residual Analysis**: Prediction errors and systematic patterns
+        """)
+
+        st.info("""
+        💡 **Note on Identical Sharpe Ratios:**
+        All PINN models show identical Sharpe ratios (~26) because they execute identical trading
+        strategies (100% long) in a bullish market. This dashboard shows metrics that actually
+        differentiate model quality: directional accuracy, correlation, and prediction magnitude.
+
+        📖 See SHARPE_RATIO_INVESTIGATION.md for detailed explanation.
+        """)
+
+        try:
+            # Import prediction visualizer
+            from src.web.prediction_visualizer import PredictionVisualizer
+
+            # Model selection
+            col1, col2 = st.columns([2, 1])
+
+            with col1:
+                st.subheader("Select Model and Visualization Type")
+                model_name = st.selectbox(
+                    "Choose a model:",
+                    options=[
+                        'pinn_baseline',
+                        'pinn_gbm',
+                        'pinn_ou',
+                        'pinn_black_scholes',
+                        'pinn_gbm_ou',
+                        'pinn_global'
+                    ],
+                    key='pred_model_selector'
+                )
+
+            with col2:
+                visualization_type = st.selectbox(
+                    "Visualization:",
+                    options=[
+                        "Time Series",
+                        "Scatter Plot",
+                        "Distributions",
+                        "Residual Analysis"
+                    ],
+                    key='pred_viz_selector'
+                )
+
+            st.markdown("---")
+
+            # Display info about how to enable visualizations
+            st.info("""
+            📊 **To Enable Visualizations:**
+            1. Run: `python compute_all_financial_metrics.py`
+            2. This generates predictions and stores them in `results/` directory
+            3. Visualizations will automatically populate
+
+            **Each visualization shows:**
+            - **Time Series**: How predictions track actual returns over time
+            - **Scatter Plot**: Prediction accuracy and correlation strength
+            - **Distributions**: Statistical properties of predictions vs market
+            - **Residual Analysis**: Systematic prediction errors and patterns
+            """)
+
+            # Placeholder for actual data (would be loaded once predictions are available)
+            st.warning("""
+            ⏳ Waiting for prediction data...
+            Run compute_all_financial_metrics.py to generate visualizations
+            """)
+
+        except ImportError:
+            st.error("Prediction visualizer module not found")
+        except Exception as e:
+            st.error(f"Error loading prediction visualizations: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 
     # BACKTESTING
     elif page == "Backtesting":
@@ -461,4 +820,10 @@ results = agent.run_backtest(signals_df, prices_df)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        st.error(f"Application failed to start: {e}")
+        st.error("Please check the logs for more details")
+        import traceback
+        st.code(traceback.format_exc())

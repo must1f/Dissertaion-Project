@@ -33,6 +33,10 @@ class DataFetcher:
         """
         self.config = config or get_config()
         self.db = get_db()
+        
+        # Check database connection status
+        if not self.db.is_connected():
+            logger.warning("Database not available, will use Parquet files for data storage")
 
         # Alpha Vantage setup (if API key available)
         self.alpha_vantage = None
@@ -87,6 +91,11 @@ class DataFetcher:
 
                 # Prepare DataFrame
                 df = data.copy()
+
+                # Flatten MultiIndex columns if present (yfinance sometimes returns MultiIndex)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
                 df['ticker'] = ticker
                 df['time'] = df.index
                 df = df.rename(columns={
@@ -288,3 +297,44 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"Failed to fetch S&P 500 tickers: {e}")
             return []
+
+
+if __name__ == "__main__":
+    """Run data fetcher as standalone script"""
+    import sys
+    from pathlib import Path
+    
+    # Add project root to path
+    project_root = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(project_root))
+    
+    from src.utils.logger import setup_logger
+    
+    # Setup logging
+    setup_logger(level="INFO")
+    
+    logger.info("=" * 80)
+    logger.info("DATA FETCHING")
+    logger.info("=" * 80)
+    
+    # Fetch and store data
+    config = get_config()
+    fetcher = DataFetcher(config)
+    
+    # Fetch top 10 tickers (for quick demo)
+    tickers = config.data.tickers[:10]
+    logger.info(f"Fetching data for {len(tickers)} tickers: {tickers}")
+    
+    df = fetcher.fetch_and_store(
+        tickers=tickers,
+        start_date=config.data.start_date,
+        end_date=config.data.end_date,
+        force_refresh=False
+    )
+    
+    if df.empty:
+        logger.error("Failed to fetch data!")
+        sys.exit(1)
+    
+    logger.info(f"✓ Successfully fetched {len(df)} records for {len(df['ticker'].unique())} tickers")
+    logger.info("=" * 80)

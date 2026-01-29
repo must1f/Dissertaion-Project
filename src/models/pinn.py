@@ -31,10 +31,14 @@ class PhysicsLoss(nn.Module):
         lambda_ou: float = 0.1,
         lambda_langevin: float = 0.1,
         risk_free_rate: float = 0.02,  # 2% annual risk-free rate
-        dt: float = 1.0 / 252.0  # Time step in years (1 trading day)
+        dt: float = 1.0 / 252.0,  # Time step in years (1 trading day)
+        # Learnable physics parameters (initial values)
+        theta_init: float = 1.0,      # OU mean reversion speed
+        gamma_init: float = 0.5,      # Langevin friction coefficient
+        temperature_init: float = 0.1  # Langevin temperature
     ):
         """
-        Initialize physics loss
+        Initialize physics loss with LEARNABLE physics parameters
 
         Args:
             lambda_gbm: Weight for GBM constraint
@@ -43,6 +47,9 @@ class PhysicsLoss(nn.Module):
             lambda_langevin: Weight for Langevin dynamics constraint
             risk_free_rate: Risk-free interest rate (annualized)
             dt: Time step in years
+            theta_init: Initial value for OU mean reversion speed (learnable)
+            gamma_init: Initial value for Langevin friction (learnable)
+            temperature_init: Initial value for Langevin temperature (learnable)
         """
         super(PhysicsLoss, self).__init__()
 
@@ -52,6 +59,48 @@ class PhysicsLoss(nn.Module):
         self.lambda_langevin = lambda_langevin
         self.risk_free_rate = risk_free_rate
         self.dt = dt
+
+        # ========== LEARNABLE PHYSICS PARAMETERS ==========
+        # These are registered as nn.Parameter so they're optimized during training
+        # This addresses the audit finding about hardcoded parameters
+
+        # Ornstein-Uhlenbeck mean reversion speed (θ)
+        # Higher theta = faster mean reversion
+        # Constrained positive via softplus in forward pass
+        self.theta_raw = nn.Parameter(torch.tensor(theta_init))
+
+        # Langevin friction coefficient (γ)
+        # Represents market friction/resistance to momentum
+        self.gamma_raw = nn.Parameter(torch.tensor(gamma_init))
+
+        # Langevin temperature (T)
+        # Represents noise/uncertainty level in the market
+        self.temperature_raw = nn.Parameter(torch.tensor(temperature_init))
+
+        logger.info(f"Physics parameters initialized: θ={theta_init:.3f}, γ={gamma_init:.3f}, T={temperature_init:.3f}")
+
+    @property
+    def theta(self) -> torch.Tensor:
+        """Get learned OU mean reversion speed (constrained positive)"""
+        return torch.nn.functional.softplus(self.theta_raw)
+
+    @property
+    def gamma(self) -> torch.Tensor:
+        """Get learned Langevin friction coefficient (constrained positive)"""
+        return torch.nn.functional.softplus(self.gamma_raw)
+
+    @property
+    def temperature(self) -> torch.Tensor:
+        """Get learned Langevin temperature (constrained positive)"""
+        return torch.nn.functional.softplus(self.temperature_raw)
+
+    def get_learned_params(self) -> Dict[str, float]:
+        """Get current learned physics parameter values"""
+        return {
+            'theta': self.theta.item(),
+            'gamma': self.gamma.item(),
+            'temperature': self.temperature.item()
+        }
 
     def gbm_residual(
         self,
@@ -90,8 +139,11 @@ class PhysicsLoss(nn.Module):
         r: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Black-Scholes PDE residual:
+        Black-Scholes PDE residual (legacy - uses pre-computed derivatives):
         ∂V/∂t + ½σ²S²(∂²V/∂S²) + rS(∂V/∂S) - rV = 0
+
+        NOTE: For proper physics-informed learning, use black_scholes_autograd_residual
+        which computes derivatives via automatic differentiation.
 
         Args:
             V: Option value (or predicted price)
@@ -117,6 +169,90 @@ class PhysicsLoss(nn.Module):
         )
 
         return torch.mean(bs_pde ** 2)
+
+    def black_scholes_autograd_residual(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        sigma: torch.Tensor,
+        price_feature_idx: int = 0,
+        r: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Black-Scholes PDE residual using AUTOMATIC DIFFERENTIATION
+
+        This is the correct physics-informed implementation that computes
+        derivatives via torch.autograd.grad with create_graph=True.
+
+        Black-Scholes PDE: ∂V/∂t + ½σ²S²(∂²V/∂S²) + rS(∂V/∂S) - rV = 0
+
+        Since we don't have explicit time input, we use a simplified steady-state
+        version: ½σ²S²(∂²V/∂S²) + rS(∂V/∂S) - rV ≈ 0
+
+        Args:
+            model: Neural network model that produces predictions V
+            x: Input tensor [batch, seq_len, features] with the price feature
+            sigma: Volatility tensor [batch] or scalar
+            price_feature_idx: Index of the price feature in the feature dimension
+            r: Risk-free rate (optional, uses default if None)
+
+        Returns:
+            Black-Scholes PDE residual loss
+        """
+        if r is None:
+            r = torch.tensor(self.risk_free_rate, device=x.device, dtype=x.dtype)
+
+        # Clone input and enable gradient tracking
+        x_grad = x.clone().detach().requires_grad_(True)
+
+        # Forward pass through model
+        V = model(x_grad)
+        if len(V.shape) == 1:
+            V = V.unsqueeze(-1)
+
+        # Extract current price S from the last timestep
+        S = x[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+
+        # Ensure sigma has correct shape
+        if sigma.dim() == 0:
+            sigma = sigma.expand(x.shape[0], 1)
+        elif sigma.dim() == 1:
+            sigma = sigma.unsqueeze(-1)
+
+        # ========== COMPUTE FIRST DERIVATIVE dV/dS via AUTOGRAD ==========
+        grad_outputs = torch.ones_like(V)
+        dV_dx = torch.autograd.grad(
+            outputs=V,
+            inputs=x_grad,
+            grad_outputs=grad_outputs,
+            create_graph=True,  # CRITICAL: enables higher-order derivatives
+            retain_graph=True
+        )[0]
+
+        # Extract gradient w.r.t. price feature at last timestep
+        dV_dS = dV_dx[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+
+        # ========== COMPUTE SECOND DERIVATIVE d²V/dS² via AUTOGRAD ==========
+        d2V_dx = torch.autograd.grad(
+            outputs=dV_dS,
+            inputs=x_grad,
+            grad_outputs=torch.ones_like(dV_dS),
+            create_graph=True,  # CRITICAL: integrates into training
+            retain_graph=True
+        )[0]
+
+        d2V_dS2 = d2V_dx[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+
+        # ========== BLACK-SCHOLES PDE RESIDUAL ==========
+        # Simplified steady-state form (without ∂V/∂t):
+        # ½σ²S²(∂²V/∂S²) + rS(∂V/∂S) - rV = 0
+        bs_residual = (
+            0.5 * (sigma ** 2) * (S ** 2) * d2V_dS2
+            + r * S * dV_dS
+            - r * V
+        )
+
+        return torch.mean(bs_residual ** 2)
 
     def ornstein_uhlenbeck_residual(
         self,
@@ -211,7 +347,7 @@ class PhysicsLoss(nn.Module):
         physics_loss = torch.tensor(0.0, device=predictions.device)
 
         # GBM constraint
-        if self.lambda_gbm > 0 and prices.shape[1] > 1:
+        if self.lambda_gbm > 0 and prices is not None and prices.shape[1] > 1:
             try:
                 S = prices[:, :-1]  # Current prices
                 S_next = prices[:, 1:]  # Next prices
@@ -229,26 +365,28 @@ class PhysicsLoss(nn.Module):
                 logger.debug(f"GBM loss computation failed: {e}")
 
         # Ornstein-Uhlenbeck constraint (mean reversion in returns)
-        if self.lambda_ou > 0 and returns.shape[1] > 1:
+        if self.lambda_ou > 0 and returns is not None and returns.shape[1] > 1:
             try:
                 X = returns[:, :-1]  # Current returns
                 X_next = returns[:, 1:]  # Next returns
                 dX_dt = (X_next - X) / self.dt
 
-                # Estimate OU parameters
-                theta = torch.tensor(1.0, device=returns.device)  # Mean reversion speed
+                # Use LEARNABLE theta (mean reversion speed)
+                # self.theta is constrained positive via softplus
+                theta = self.theta.to(returns.device)
                 mu = returns.mean(dim=1, keepdim=True)  # Long-term mean
                 sigma = returns.std(dim=1, keepdim=True)  # Volatility
 
                 ou_loss = self.ornstein_uhlenbeck_residual(X, dX_dt, theta, mu, sigma)
                 physics_loss = physics_loss + self.lambda_ou * ou_loss
                 loss_dict['ou_loss'] = ou_loss.item()
+                loss_dict['theta_learned'] = theta.item()  # Log learned value
 
             except Exception as e:
                 logger.debug(f"OU loss computation failed: {e}")
 
         # Langevin dynamics (momentum)
-        if self.lambda_langevin > 0 and returns.shape[1] > 1:
+        if self.lambda_langevin > 0 and returns is not None and returns.shape[1] > 1:
             try:
                 X = returns[:, :-1]
                 X_next = returns[:, 1:]
@@ -257,12 +395,16 @@ class PhysicsLoss(nn.Module):
                 # Approximate gradient of potential
                 grad_U = -returns[:, :-1]  # Negative returns as potential gradient
 
-                gamma = torch.tensor(0.5, device=returns.device)
-                T = torch.tensor(0.1, device=returns.device)
+                # Use LEARNABLE gamma (friction) and temperature
+                # Both are constrained positive via softplus
+                gamma = self.gamma.to(returns.device)
+                T = self.temperature.to(returns.device)
 
                 langevin_loss = self.langevin_residual(X, dX_dt, grad_U, gamma, T)
                 physics_loss = physics_loss + self.lambda_langevin * langevin_loss
                 loss_dict['langevin_loss'] = langevin_loss.item()
+                loss_dict['gamma_learned'] = gamma.item()  # Log learned values
+                loss_dict['temperature_learned'] = T.item()
 
             except Exception as e:
                 logger.debug(f"Langevin loss computation failed: {e}")
@@ -290,7 +432,7 @@ class PINNModel(nn.Module):
         dropout: float = 0.2,
         base_model: str = 'lstm',
         lambda_gbm: float = 0.1,
-        lambda_bs: float = 0.0,  # Disabled by default (requires automatic differentiation)
+        lambda_bs: float = 0.1,  # Now enabled with proper autograd implementation
         lambda_ou: float = 0.1,
         lambda_langevin: float = 0.1,
         risk_free_rate: float = 0.02,
@@ -307,7 +449,7 @@ class PINNModel(nn.Module):
             dropout: Dropout probability
             base_model: Base model type ('lstm', 'gru', 'transformer')
             lambda_gbm: GBM loss weight
-            lambda_bs: Black-Scholes loss weight
+            lambda_bs: Black-Scholes loss weight (uses autograd for derivatives)
             lambda_ou: OU loss weight
             lambda_langevin: Langevin loss weight
             risk_free_rate: Risk-free rate
@@ -365,7 +507,7 @@ class PINNModel(nn.Module):
         )
 
         logger.info(f"Initialized PINN model with base={base_model}, "
-                   f"λ_gbm={lambda_gbm}, λ_ou={lambda_ou}, λ_langevin={lambda_langevin}")
+                   f"λ_gbm={lambda_gbm}, λ_bs={lambda_bs}, λ_ou={lambda_ou}, λ_langevin={lambda_langevin}")
 
     def forward(
         self,
@@ -403,7 +545,12 @@ class PINNModel(nn.Module):
         Args:
             predictions: Model predictions
             targets: Ground truth
-            metadata: Batch metadata containing prices, returns, volatilities
+            metadata: Batch metadata containing:
+                - prices: Price sequences
+                - returns: Return sequences
+                - volatilities: Volatility sequences
+                - inputs: Original input features (for Black-Scholes autograd)
+                - price_feature_idx: Index of price feature (default: 0)
             enable_physics: Whether to enable physics losses
 
         Returns:
@@ -413,9 +560,11 @@ class PINNModel(nn.Module):
         prices = metadata.get('prices', None)
         returns = metadata.get('returns', None)
         volatilities = metadata.get('volatilities', None)
+        inputs = metadata.get('inputs', None)  # For Black-Scholes autograd
+        price_feature_idx = metadata.get('price_feature_idx', 0)
 
-        # Compute physics-informed loss
-        return self.physics_loss(
+        # Compute base physics-informed loss (GBM, OU, Langevin)
+        total_loss, loss_dict = self.physics_loss(
             predictions=predictions,
             targets=targets,
             prices=prices,
@@ -423,3 +572,57 @@ class PINNModel(nn.Module):
             volatilities=volatilities,
             enable_physics=enable_physics
         )
+
+        # ========== BLACK-SCHOLES WITH AUTOMATIC DIFFERENTIATION ==========
+        # This uses the new autograd implementation that computes derivatives
+        # via torch.autograd.grad with create_graph=True
+        if (enable_physics and
+            self.physics_loss.lambda_bs > 0 and
+            inputs is not None and
+            volatilities is not None):
+            try:
+                # Get volatility (use mean volatility or last timestep)
+                if volatilities.dim() > 1:
+                    sigma = volatilities[:, -1]  # [batch]
+                else:
+                    sigma = volatilities
+
+                # Compute Black-Scholes loss using autograd
+                bs_loss = self.physics_loss.black_scholes_autograd_residual(
+                    model=self,
+                    x=inputs,
+                    sigma=sigma,
+                    price_feature_idx=price_feature_idx
+                )
+
+                # Add to total loss
+                total_loss = total_loss + self.physics_loss.lambda_bs * bs_loss
+                loss_dict['bs_loss'] = bs_loss.item()
+                loss_dict['total_loss'] = total_loss.item()
+
+                logger.debug(f"Black-Scholes autograd loss: {bs_loss.item():.6f}")
+
+            except Exception as e:
+                logger.debug(f"Black-Scholes autograd computation failed: {e}")
+
+        return total_loss, loss_dict
+
+    def get_learned_physics_params(self) -> Dict[str, float]:
+        """
+        Get current learned physics parameter values
+
+        Returns:
+            Dict with learned parameter values:
+                - theta: OU mean reversion speed
+                - gamma: Langevin friction coefficient
+                - temperature: Langevin temperature
+        """
+        return self.physics_loss.get_learned_params()
+
+    def log_physics_params(self):
+        """Log current learned physics parameters"""
+        params = self.get_learned_physics_params()
+        logger.info("Learned Physics Parameters:")
+        logger.info(f"  θ (OU mean reversion): {params['theta']:.4f}")
+        logger.info(f"  γ (Langevin friction): {params['gamma']:.4f}")
+        logger.info(f"  T (Langevin temperature): {params['temperature']:.4f}")

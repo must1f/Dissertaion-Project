@@ -37,18 +37,50 @@ class MetricsCalculator:
         return r2_score(y_true, y_pred)
 
     @staticmethod
-    def directional_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    def directional_accuracy(
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        are_returns: bool = False,
+        threshold: float = 1e-8
+    ) -> float:
         """
         Percentage of correct directional predictions
         (Did we predict the direction of change correctly?)
+
+        Args:
+            y_true: True values (prices or returns)
+            y_pred: Predicted values (prices or returns)
+            are_returns: If True, inputs are returns (compare signs directly)
+                        If False, inputs are prices (compare direction of changes)
+            threshold: Minimum absolute change to consider significant
+
+        Returns:
+            Directional accuracy as percentage (0 to 100)
         """
-        # Calculate returns (change from previous value)
-        true_direction = np.sign(np.diff(y_true))
-        pred_direction = np.sign(np.diff(y_pred))
+        if len(y_true) < 2 or len(y_pred) < 2:
+            return 0.0
+
+        if are_returns:
+            # Inputs are already returns - compare signs directly
+            true_direction = y_true
+            pred_direction = y_pred
+        else:
+            # Calculate returns (change from previous value)
+            true_direction = np.diff(y_true)
+            pred_direction = np.diff(y_pred)
+
+        # Apply threshold to filter out insignificant movements
+        significant_mask = np.abs(true_direction) > threshold
+
+        if np.sum(significant_mask) == 0:
+            return 50.0  # No significant movements, return random baseline
+
+        true_significant = np.sign(true_direction[significant_mask])
+        pred_significant = np.sign(pred_direction[significant_mask])
 
         # Percentage of correct directions
-        correct = (true_direction == pred_direction).sum()
-        total = len(true_direction)
+        correct = (true_significant == pred_significant).sum()
+        total = len(true_significant)
 
         return (correct / total) * 100 if total > 0 else 0.0
 

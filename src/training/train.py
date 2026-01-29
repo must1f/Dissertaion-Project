@@ -8,12 +8,18 @@ import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import multiprocessing
+
+# Set multiprocessing start method for macOS compatibility
+# This must be done before any other multiprocessing code
+if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn', force=True)
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.utils.config import get_config
-from src.utils.logger import get_logger, setup_logger
+from src.utils.logger import get_logger, ensure_logger_initialized
 from src.utils.reproducibility import set_seed, log_system_info, get_device
 from src.utils.database import get_db
 from src.data.fetcher import DataFetcher
@@ -221,8 +227,8 @@ def create_model(model_type: str, input_dim: int, config) -> torch.nn.Module:
 def main(args):
     """Main training function"""
 
-    # Setup logging
-    setup_logger(level="INFO")
+    # Setup logging (only once per process)
+    ensure_logger_initialized()
 
     logger.info("=" * 80)
     logger.info("PINN FINANCIAL FORECASTING - TRAINING")
@@ -266,7 +272,8 @@ def main(args):
     history = trainer.train(
         epochs=args.epochs or config.training.epochs,
         enable_physics=enable_physics,
-        save_best=True
+        save_best=True,
+        model_name=args.model  # Pass model name so checkpoints save to /models/{model}_best.pt
     )
 
     # Evaluate on test set
@@ -281,11 +288,28 @@ def main(args):
     results_path.parent.mkdir(exist_ok=True)
 
     import json
+    import numpy as np
+
+    def convert_to_python_types(obj):
+        """Convert numpy types to Python types for JSON serialization"""
+        if isinstance(obj, dict):
+            return {k: convert_to_python_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_python_types(v) for v in obj]
+        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj
+
     with open(results_path, 'w') as f:
         json.dump({
             'model': args.model,
-            'test_metrics': test_metrics,
-            'training_history': history
+            'test_metrics': convert_to_python_types(test_metrics),
+            'training_history': convert_to_python_types(history)
         }, f, indent=2)
 
     logger.info(f"\nResults saved to {results_path}")

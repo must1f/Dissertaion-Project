@@ -88,9 +88,9 @@ cp .env.example .env
 
 3. **Install dependencies**
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+python3 -m venv venv
+source venv/bin/activate  
+pip3 install -r requirements.txt
 ```
 
 4. **Start database (optional but recommended)**
@@ -103,10 +103,10 @@ docker-compose up -d timescaledb
 #### Option 1: Quick Demo (CPU, subset of data)
 ```bash
 # Fetch data
-python -m src.data.fetcher
+python3 -m src.data.fetcher
 
 # Train PINN model
-python -m src.training.train --model pinn --epochs 20
+python3 -m src.training.train --model pinn --epochs 20
 
 # Launch web interface
 streamlit run src/web/app.py
