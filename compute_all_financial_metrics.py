@@ -171,11 +171,11 @@ class ModelEvaluator:
 
             if model_class == TransformerModel:
                 model = model_class(
-                    input_size=input_dim,
+                    input_dim=input_dim,
                     d_model=hidden_size,
                     nhead=num_heads,
-                    num_layers=num_layers,
-                    output_size=1,
+                    num_encoder_layers=num_layers,
+                    output_dim=1,
                     dropout=dropout
                 )
             elif model_class == PINNModel:
@@ -189,11 +189,12 @@ class ModelEvaluator:
                 )
             else:
                 # Baseline models (LSTM, GRU, BiLSTM, AttentionLSTM)
+                # These use input_dim, hidden_dim, output_dim
                 model = model_class(
-                    input_size=input_dim,
-                    hidden_size=hidden_size,
+                    input_dim=input_dim,
+                    hidden_dim=hidden_size,
                     num_layers=num_layers,
-                    output_size=1,
+                    output_dim=1,
                     dropout=dropout
                 )
 
@@ -231,7 +232,13 @@ class ModelEvaluator:
                 X_batch = X_batch.to(self.device)
 
                 # Get predictions
-                predictions = model(X_batch)
+                output = model(X_batch)
+
+                # Handle models that return tuples (LSTM, GRU return (output, hidden))
+                if isinstance(output, tuple):
+                    predictions = output[0]  # First element is the actual output
+                else:
+                    predictions = output
 
                 all_predictions.append(predictions.cpu().numpy())
                 all_targets.append(y_batch.numpy())

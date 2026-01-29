@@ -1,0 +1,13 @@
+\begin{table}[htbp]
+\caption{Overfitting Analysis: Train-Test Loss Gap}
+\label{tab:overfitting_analysis}
+\begin{tabular}{lccccc}
+\toprule
+model & final_train_loss & final_val_loss & overfit_gap & overfit_ratio & overfitting \\
+\midrule
+lstm & 0.0099 & 0.1222 & 0.1123 & 12.3911 & High \\
+gru & 0.0084 & 0.1424 & 0.1340 & 16.9158 & High \\
+transformer & 0.0103 & 0.5009 & 0.4906 & 48.5419 & High \\
+\bottomrule
+\end{tabular}
+\end{table}
