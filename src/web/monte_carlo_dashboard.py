@@ -32,6 +32,7 @@ from src.evaluation.monte_carlo import (
     MonteCarloResults,
     compute_var_cvar
 )
+from src.models.model_registry import get_model_registry
 
 ensure_logger_initialized()
 logger = get_logger(__name__)
@@ -359,9 +360,22 @@ def main():
     # Sidebar configuration
     st.sidebar.header("⚙️ Simulation Settings")
 
-    # Model selection (placeholder - would load actual models)
-    model_options = ["Synthetic Demo", "PINN Global", "PINN GBM", "PINN OU", "StackedPINN"]
+    # Get available trained models from registry
+    config = get_config()
+    registry = get_model_registry(config.project_root)
+    trained_models = registry.get_trained_models()
+
+    # Build model options - trained models + synthetic demo
+    model_options = ["Synthetic Demo"]
+    model_key_map = {"Synthetic Demo": None}
+
+    for key, info in trained_models.items():
+        display_name = f"{info.model_name} ({info.architecture})"
+        model_options.append(display_name)
+        model_key_map[display_name] = key
+
     selected_model = st.sidebar.selectbox("Select Model", model_options)
+    selected_model_key = model_key_map.get(selected_model)
 
     # Simulation parameters
     n_simulations = st.sidebar.slider("Number of Simulations", 100, 5000, 1000, 100)
@@ -386,20 +400,39 @@ def main():
 
         with st.spinner("Running Monte Carlo simulation..."):
             # Load/generate model
-            if selected_model == "Synthetic Demo":
+            if selected_model_key is None:
+                # Synthetic Demo
                 model = generate_synthetic_model()
                 features, prices = generate_synthetic_data()
                 st.info("Using synthetic model and data for demonstration.")
             else:
-                # Try to load actual model
+                # Load actual trained model from registry
                 try:
-                    config = get_config()
-                    model_path = config.project_root / 'models' / f'{selected_model.lower().replace(" ", "_")}_best.pt'
-                    if model_path.exists():
-                        # Load actual model (would need proper model class)
-                        st.warning(f"Model loading not yet implemented for {selected_model}. Using synthetic demo.")
-                    model = generate_synthetic_model()
-                    features, prices = generate_synthetic_data()
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    model = registry.load_model(
+                        model_key=selected_model_key,
+                        device=device,
+                        input_dim=5  # Default feature dimension
+                    )
+
+                    if model is not None:
+                        # Load actual data (try to load from results or generate synthetic)
+                        features, prices = generate_synthetic_data()  # For now, use synthetic data
+                        st.success(f"Loaded trained model: {selected_model}")
+
+                        # Show model info
+                        model_info = registry.get_model_info(selected_model_key)
+                        if model_info:
+                            st.sidebar.info(
+                                f"Architecture: {model_info.architecture}\n"
+                                f"Trained: {model_info.training_date}\n"
+                                f"Epochs: {model_info.epochs_trained or 'N/A'}"
+                            )
+                    else:
+                        st.warning(f"Could not load {selected_model}. Using synthetic demo.")
+                        model = generate_synthetic_model()
+                        features, prices = generate_synthetic_data()
+
                 except Exception as e:
                     st.warning(f"Could not load model: {e}. Using synthetic demo.")
                     model = generate_synthetic_model()

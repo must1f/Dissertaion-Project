@@ -253,8 +253,10 @@ python src/training/train_stacked_pinn.py --model-type residual --epochs 100
 
                 # ML Metrics
                 'MSE': ml_metrics.get('mse', metrics.get('mse', np.nan)),
+                'RMSE': ml_metrics.get('rmse', metrics.get('rmse', np.nan)),
                 'MAE': ml_metrics.get('mae', metrics.get('mae', np.nan)),
                 'R²': ml_metrics.get('r2', metrics.get('r2', np.nan)),
+                'MAPE': ml_metrics.get('mape', metrics.get('mape', np.nan)),
 
                 # Financial Metrics
                 'Sharpe': metrics.get('sharpe_ratio', np.nan),
@@ -299,10 +301,12 @@ python src/training/train_stacked_pinn.py --model-type residual --epochs 100
 
     def _load_model_results(self, model_key: str, model_info: ModelInfo) -> Optional[Dict]:
         """Load results for a model"""
-        # Try multiple locations
+        # Try multiple locations (including pinn_ prefix variants)
         possible_paths = [
             self.config.project_root / 'results' / f'{model_key}_results.json',
+            self.config.project_root / 'results' / f'pinn_{model_key}_results.json',
             self.config.project_root / 'results' / 'pinn_comparison' / f'{model_key}_results.json',
+            self.config.project_root / 'results' / 'pinn_comparison' / f'pinn_{model_key}_results.json',
             self.config.project_root / 'models' / 'stacked_pinn' / f'{model_key}_pinn_results.json',
         ]
 
@@ -313,27 +317,71 @@ python src/training/train_stacked_pinn.py --model-type residual --epochs 100
             if path.exists():
                 try:
                     with open(path, 'r') as f:
-                        return json.load(f)
-                except:
+                        result = json.load(f)
+                        # FIX: Normalize metrics before returning
+                        return self._normalize_metrics(result)
+                except (json.JSONDecodeError, IOError, KeyError) as e:
+                    logger.debug(f"Could not load results from {path}: {e}")
                     continue
 
         return None
+
+    def _normalize_metrics(self, result: Dict) -> Dict:
+        """Normalize metrics from different result formats and fix invalid values"""
+        # Ensure ml_metrics exists
+        if 'ml_metrics' not in result:
+            result['ml_metrics'] = {}
+
+        ml = result['ml_metrics']
+        test = result.get('test_metrics', {})
+
+        # Copy test_metrics to ml_metrics if missing
+        if 'mse' not in ml:
+            rmse = test.get('test_rmse') or ml.get('rmse', 0)
+            ml['mse'] = rmse ** 2 if rmse else 0
+        if 'rmse' not in ml:
+            ml['rmse'] = test.get('test_rmse', 0)
+        if 'mae' not in ml:
+            ml['mae'] = test.get('test_mae', 0)
+        if 'r2' not in ml:
+            ml['r2'] = test.get('test_r2', 0)
+        if 'mape' not in ml:
+            ml['mape'] = test.get('test_mape', 0)
+
+        # FIX: Validate financial metrics - replace inf/nan
+        if 'financial_metrics' in result:
+            fm = result['financial_metrics']
+            for key, value in list(fm.items()):
+                if isinstance(value, (int, float)):
+                    if np.isinf(value) or value > 1e10 or value < -1e10:
+                        fm[key] = 10.0 if value > 0 else -10.0
+                    elif np.isnan(value):
+                        fm[key] = 0.0
+
+            # FIX: Ensure max_drawdown is capped at -100%
+            if fm.get('max_drawdown', 0) < -1.0:
+                fm['max_drawdown'] = -1.0
+
+        return result
 
     def _render_overview_comparison(self, df: pd.DataFrame):
         """Render overview comparison"""
         st.markdown("### Complete Metrics Overview")
 
         # Select key metrics
-        key_cols = ['Model', 'Type', 'MSE', 'Sharpe', 'Max_DD_%', 'Dir_Acc_%', 'Profit_Factor']
+        key_cols = ['Model', 'Type', 'MSE', 'RMSE', 'MAE', 'R²', 'Sharpe', 'Max_DD_%', 'Dir_Acc_%', 'Profit_Factor']
 
         styled_df = df[key_cols].style.highlight_min(
-            subset=['MSE', 'Max_DD_%'],
+            subset=['MSE', 'RMSE', 'MAE', 'Max_DD_%'],
             color='lightgreen'
         ).highlight_max(
-            subset=['Sharpe', 'Dir_Acc_%', 'Profit_Factor'],
+            subset=['R²', 'Sharpe', 'Dir_Acc_%', 'Profit_Factor'],
             color='lightgreen'
         ).format({
             'MSE': '{:.6f}',
+            'RMSE': '{:.6f}',
+            'MAE': '{:.6f}',
+            'R²': '{:.4f}',
             'Sharpe': '{:.3f}',
             'Max_DD_%': '{:.2f}%',
             'Dir_Acc_%': '{:.2f}%',

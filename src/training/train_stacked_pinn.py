@@ -196,7 +196,7 @@ def train_epoch(
     Train for one batch
 
     Returns:
-        Dict with losses
+        Dict with losses and directional accuracy
     """
     model.train()
 
@@ -245,13 +245,22 @@ def train_epoch(
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
 
-    # Return metrics
+    # Compute training directional accuracy (BUG #16 FIX)
+    # Compare predicted direction with actual direction
+    with torch.no_grad():
+        pred_direction = (return_pred > 0).float()
+        actual_direction = (y_batch > 0).float()
+        correct = (pred_direction == actual_direction).float().mean().item()
+        directional_accuracy = correct
+
+    # Return metrics including directional accuracy
     return {
         'total_loss': total_loss.item(),
         'prediction_loss': prediction_loss.item(),
         'regression_loss': regression_loss.item(),
         'classification_loss': classification_loss.item(),
         'physics_loss': physics_loss.item(),
+        'directional_accuracy': directional_accuracy,
         **physics_dict
     }
 

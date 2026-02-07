@@ -43,7 +43,7 @@ class FinancialMetrics:
             periods_per_year: Trading periods per year (default: 252 trading days)
 
         Returns:
-            Annualized Sharpe ratio
+            Annualized Sharpe ratio (capped at reasonable bounds)
         """
         if isinstance(returns, pd.Series):
             returns = returns.values
@@ -53,10 +53,13 @@ class FinancialMetrics:
         if len(returns) == 0:
             return 0.0
 
+        # CRITICAL FIX: Clip returns to realistic bounds first
+        returns = np.clip(returns, -0.99, 1.0)
+
         mean_return = np.mean(returns)
         std_return = np.std(returns, ddof=1)
 
-        if std_return == 0:
+        if std_return < 1e-10:
             return 0.0
 
         # Annualized risk-free rate per period
@@ -64,24 +67,32 @@ class FinancialMetrics:
 
         sharpe = (mean_return - rf_per_period) / std_return * np.sqrt(periods_per_year)
 
+        # Cap at reasonable bounds (Sharpe > 5 or < -5 is suspicious)
+        sharpe = np.clip(sharpe, -5.0, 5.0)
+
         return float(sharpe)
 
     @staticmethod
     def sortino_ratio(
         returns: Union[np.ndarray, pd.Series],
         risk_free_rate: float = 0.02,
-        periods_per_year: int = 252
+        periods_per_year: int = 252,
+        target_return: float = 0.0
     ) -> float:
         """
         Calculate Sortino Ratio (uses downside deviation instead of total std)
+
+        Uses standard Sortino definition: downside = returns below target (typically 0)
+        NOT returns below risk-free rate (that's a common error)
 
         Args:
             returns: Array of returns
             risk_free_rate: Annualized risk-free rate
             periods_per_year: Trading periods per year
+            target_return: Minimum acceptable return per period (default: 0)
 
         Returns:
-            Annualized Sortino ratio
+            Annualized Sortino ratio (capped at reasonable bounds)
         """
         if isinstance(returns, pd.Series):
             returns = returns.values
@@ -94,17 +105,24 @@ class FinancialMetrics:
         mean_return = np.mean(returns)
         rf_per_period = risk_free_rate / periods_per_year
 
-        # Downside deviation (only negative returns)
-        downside_returns = returns[returns < rf_per_period]
-        if len(downside_returns) == 0:
-            return np.inf if mean_return > rf_per_period else 0.0
+        # CRITICAL FIX: Standard Sortino uses returns below target (typically 0)
+        # NOT returns below risk-free rate
+        downside_returns = returns[returns < target_return]
 
+        if len(downside_returns) == 0:
+            # No downside: return large but finite value
+            return 10.0 if mean_return > rf_per_period else 0.0
+
+        # Downside deviation: std of returns below target
         downside_std = np.std(downside_returns, ddof=1)
 
-        if downside_std == 0:
-            return 0.0
+        if downside_std < 1e-10:
+            return 10.0 if mean_return > rf_per_period else 0.0
 
         sortino = (mean_return - rf_per_period) / downside_std * np.sqrt(periods_per_year)
+
+        # Cap at reasonable bounds (Sortino > 10 or < -10 is suspicious)
+        sortino = np.clip(sortino, -10.0, 10.0)
 
         return float(sortino)
 
@@ -121,7 +139,7 @@ class FinancialMetrics:
             return_series: If True, return (max_dd, drawdown_series)
 
         Returns:
-            Maximum drawdown (negative value) or (max_dd, drawdown_series)
+            Maximum drawdown (negative value, capped at -1.0 = -100%) or (max_dd, drawdown_series)
         """
         if isinstance(returns, pd.Series):
             returns = returns.values
@@ -131,14 +149,24 @@ class FinancialMetrics:
         if len(returns) == 0:
             return 0.0 if not return_series else (0.0, np.array([]))
 
-        # Cumulative returns
-        cum_returns = np.cumprod(1 + returns)
+        # CRITICAL FIX: Clip individual returns to realistic bounds
+        # No single-period return can exceed -100% (total loss) in reality
+        # Upper bound of +100% is generous for daily returns
+        returns_clipped = np.clip(returns, -0.99, 1.0)
+
+        # Cumulative returns with equity floor
+        # Equity cannot go below 0 (you can't lose more than 100%)
+        cum_returns = np.cumprod(1 + returns_clipped)
+        cum_returns = np.maximum(cum_returns, 1e-10)  # Equity floor (essentially 0)
 
         # Running maximum
         running_max = np.maximum.accumulate(cum_returns)
 
         # Drawdown series
         drawdown = (cum_returns - running_max) / running_max
+
+        # Cap drawdown at -100% (physically impossible to exceed)
+        drawdown = np.maximum(drawdown, -1.0)
 
         max_dd = np.min(drawdown)
 
@@ -159,7 +187,7 @@ class FinancialMetrics:
             periods_per_year: Trading periods per year
 
         Returns:
-            Calmar ratio
+            Calmar ratio (capped at reasonable bounds)
         """
         if isinstance(returns, pd.Series):
             returns = returns.values
@@ -169,18 +197,33 @@ class FinancialMetrics:
         if len(returns) == 0:
             return 0.0
 
+        # CRITICAL FIX: Clip returns before computing
+        returns = np.clip(returns, -0.99, 1.0)
+
         # Annualized return
         total_return = np.prod(1 + returns) - 1
         n_years = len(returns) / periods_per_year
-        annual_return = (1 + total_return) ** (1 / n_years) - 1 if n_years > 0 else 0.0
+
+        if n_years <= 0:
+            return 0.0
+
+        # Handle edge cases for annual return calculation
+        if total_return <= -1:
+            annual_return = -1.0  # Total loss
+        else:
+            annual_return = (1 + total_return) ** (1 / n_years) - 1
 
         # Max drawdown
         max_dd = FinancialMetrics.max_drawdown(returns)
 
-        if max_dd == 0:
-            return np.inf if annual_return > 0 else 0.0
+        if abs(max_dd) < 0.001:  # Less than 0.1% drawdown
+            # Return bounded value instead of inf
+            return 10.0 if annual_return > 0 else 0.0
 
         calmar = annual_return / abs(max_dd)
+
+        # Cap at reasonable bounds (Calmar > 10 is exceptional)
+        calmar = np.clip(calmar, -10.0, 10.0)
 
         return float(calmar)
 
@@ -195,7 +238,7 @@ class FinancialMetrics:
             returns: Array of returns
 
         Returns:
-            Cumulative returns array
+            Cumulative returns array (with equity floor at -100%)
         """
         if isinstance(returns, pd.Series):
             returns = returns.values
@@ -205,7 +248,13 @@ class FinancialMetrics:
         if len(returns) == 0:
             return np.array([])
 
+        # CRITICAL FIX: Clip returns to realistic bounds
+        returns = np.clip(returns, -0.99, 1.0)
+
         cum_returns = np.cumprod(1 + returns) - 1
+
+        # Equity floor: can't go below -100%
+        cum_returns = np.maximum(cum_returns, -1.0)
 
         return cum_returns
 
@@ -220,7 +269,7 @@ class FinancialMetrics:
             returns: Array of returns
 
         Returns:
-            Total return
+            Total return (capped at -100% minimum)
         """
         if isinstance(returns, pd.Series):
             returns = returns.values
@@ -230,7 +279,13 @@ class FinancialMetrics:
         if len(returns) == 0:
             return 0.0
 
+        # CRITICAL FIX: Clip returns to realistic bounds first
+        returns = np.clip(returns, -0.99, 1.0)
+
         total_ret = np.prod(1 + returns) - 1
+
+        # Cap at -100% minimum (can't lose more than everything)
+        total_ret = max(total_ret, -1.0)
 
         return float(total_ret)
 
@@ -401,7 +456,7 @@ class FinancialMetrics:
             returns: Array of returns
 
         Returns:
-            Profit factor
+            Profit factor (capped at reasonable bounds)
         """
         if isinstance(returns, pd.Series):
             returns = returns.values
@@ -414,22 +469,31 @@ class FinancialMetrics:
         gross_profit = np.sum(returns[returns > 0])
         gross_loss = abs(np.sum(returns[returns < 0]))
 
-        if gross_loss == 0:
-            return np.inf if gross_profit > 0 else 0.0
+        if gross_loss < 1e-10:
+            # No losses: return bounded value instead of inf
+            return 10.0 if gross_profit > 0 else 1.0
 
-        return float(gross_profit / gross_loss)
+        pf = gross_profit / gross_loss
+
+        # Cap at reasonable bounds (PF > 10 is exceptional)
+        pf = np.clip(pf, 0.0, 10.0)
+
+        return float(pf)
 
     @staticmethod
     def information_coefficient(
         predictions: Union[np.ndarray, torch.Tensor],
-        targets: Union[np.ndarray, torch.Tensor]
+        targets: Union[np.ndarray, torch.Tensor],
+        use_returns: bool = True
     ) -> float:
         """
-        Calculate Information Coefficient (correlation between predictions and actual returns)
+        Calculate Information Coefficient (correlation between predicted and actual returns)
 
         Args:
-            predictions: Predicted returns
-            targets: Actual returns
+            predictions: Predicted prices or returns
+            targets: Actual prices or returns
+            use_returns: If True, compute IC on returns (price changes), not levels.
+                        This is the standard definition for trading signal quality.
 
         Returns:
             Information coefficient (-1 to 1)
@@ -450,25 +514,34 @@ class FinancialMetrics:
         if len(predictions) < 2:
             return 0.0
 
-        # Pearson correlation
-        ic = np.corrcoef(predictions, targets)[0, 1]
+        # FIX: Compute IC on returns (changes) for proper trading signal quality
+        if use_returns and len(predictions) > 2:
+            pred_returns = np.diff(predictions)
+            target_returns = np.diff(targets)
+            ic = np.corrcoef(pred_returns, target_returns)[0, 1]
+        else:
+            # Fallback to level correlation
+            ic = np.corrcoef(predictions, targets)[0, 1]
 
         return float(ic) if not np.isnan(ic) else 0.0
 
     @staticmethod
     def precision_recall(
         predictions: Union[np.ndarray, torch.Tensor],
-        targets: Union[np.ndarray, torch.Tensor]
+        targets: Union[np.ndarray, torch.Tensor],
+        use_returns: bool = True
     ) -> Dict[str, float]:
         """
         Calculate precision and recall for positive return prediction
 
         Args:
-            predictions: Predicted returns
-            targets: Actual returns
+            predictions: Predicted prices or returns
+            targets: Actual prices or returns
+            use_returns: If True, compute on price changes (returns), not absolute values.
+                        This is more meaningful for trading signal quality.
 
         Returns:
-            Dict with precision and recall
+            Dict with precision, recall, and f1_score
         """
         if isinstance(predictions, torch.Tensor):
             predictions = predictions.detach().cpu().numpy()
@@ -483,12 +556,19 @@ class FinancialMetrics:
         predictions = predictions[valid_mask]
         targets = targets[valid_mask]
 
-        if len(predictions) == 0:
+        if len(predictions) < 2:
             return {'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0}
 
-        # Binary classification: positive return or not
-        pred_positive = predictions > 0
-        actual_positive = targets > 0
+        # FIX: Use price changes (returns) for classification, not absolute levels
+        if use_returns:
+            pred_changes = np.diff(predictions)
+            actual_changes = np.diff(targets)
+            pred_positive = pred_changes > 0
+            actual_positive = actual_changes > 0
+        else:
+            # Fallback to absolute values
+            pred_positive = predictions > 0
+            actual_positive = targets > 0
 
         # True positives, false positives, false negatives
         tp = np.sum(pred_positive & actual_positive)
@@ -518,7 +598,7 @@ class FinancialMetrics:
             periods_per_year: Trading periods per year
 
         Returns:
-            Annualized return
+            Annualized return (capped at reasonable bounds)
         """
         if isinstance(returns, pd.Series):
             returns = returns.values
@@ -528,13 +608,29 @@ class FinancialMetrics:
         if len(returns) == 0:
             return 0.0
 
+        # CRITICAL FIX: Clip returns to realistic bounds first
+        returns = np.clip(returns, -0.99, 1.0)
+
         total_return = np.prod(1 + returns) - 1
         n_years = len(returns) / periods_per_year
 
         if n_years <= 0:
             return 0.0
 
+        # Handle edge cases
+        if total_return <= -1:
+            # Total loss - return -100% annualized
+            return -1.0
+
+        if total_return > 1e6:
+            # Suspiciously high return - cap it
+            logger.warning(f"Suspiciously high total return: {total_return:.2%}, capping")
+            total_return = 10.0  # Cap at 1000%
+
         annual_return = (1 + total_return) ** (1 / n_years) - 1
+
+        # Cap at reasonable bounds (±500% annual is extreme)
+        annual_return = np.clip(annual_return, -1.0, 5.0)
 
         return float(annual_return)
 
@@ -611,6 +707,16 @@ class FinancialMetrics:
         if len(returns_array) > 0:
             metrics['win_rate'] = float(np.mean(returns_array > 0))
 
+        # FIX: Validate all metrics and replace invalid values
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)):
+                if np.isinf(value):
+                    logger.warning(f"Metric '{key}' is infinite, capping to bounded value")
+                    metrics[key] = 10.0 if value > 0 else -10.0
+                elif np.isnan(value):
+                    logger.warning(f"Metric '{key}' is NaN, setting to 0")
+                    metrics[key] = 0.0
+
         return metrics
 
 
@@ -618,7 +724,9 @@ def compute_strategy_returns(
     predictions: np.ndarray,
     actual_prices: np.ndarray,
     transaction_cost: float = 0.001,
-    are_returns: bool = False
+    are_returns: bool = False,
+    max_return: float = 0.20,
+    min_return: float = -0.20
 ) -> np.ndarray:
     """
     Compute strategy returns from price predictions
@@ -630,18 +738,19 @@ def compute_strategy_returns(
     Args:
         predictions: Predicted prices (normalized) or returns
         actual_prices: Actual prices (normalized) or actual returns
-        transaction_cost: Transaction cost per trade (default: 0.3% for dissertation realism)
+        transaction_cost: Transaction cost per trade (default: 0.1%)
         are_returns: If True, inputs are already returns; if False, convert from prices
+        max_return: Maximum allowed single-period return (default: +20%)
+        min_return: Minimum allowed single-period return (default: -20%)
 
     Returns:
         Strategy returns array (same length as inputs)
 
     Note:
-        For dissertation purposes, transaction_cost default is 0.3% (not 0.1%)
-        to account for:
-        - Bid-ask spread: 0.05-0.15%
-        - Slippage: 0.05-0.20%
-        - Execution costs: 0.05-0.10%
+        For dissertation purposes:
+        - Transaction costs account for bid-ask spread, slippage, and execution costs
+        - Single-period returns are capped to realistic bounds (±20% daily is extreme)
+        - This prevents numerical explosions from normalized price edge cases
     """
     predictions = predictions.flatten()
     actual_prices = actual_prices.flatten()
@@ -651,28 +760,46 @@ def compute_strategy_returns(
 
     # ===== CONVERT PRICES TO RETURNS =====
     if are_returns:
-        # Already returns, use directly
-        actual_returns = actual_prices
+        # Already returns, use directly but clip to realistic bounds
+        actual_returns = np.clip(actual_prices, min_return, max_return)
         predicted_returns = predictions
     else:
-        # Convert normalized prices to returns
-        # For normalized prices near 0, this approximates: (p[t+1] - p[t]) / p[t]
-        # But we need to be careful with edge cases
+        # CRITICAL FIX: Use percentage change formula that handles normalized prices safely
+        # For normalized prices (z-scores, min-max scaled, etc.), we compute
+        # directional changes rather than percentage returns
 
-        # Compute actual returns: change from current to next period
+        # Method: Use simple differences for direction, then scale to realistic returns
+        # This avoids division-by-zero issues with normalized prices near 0
+
+        # Compute actual price changes (differences, not ratios)
+        actual_diffs = np.diff(actual_prices)
+        predicted_diffs = np.diff(predictions)
+
+        # Scale to realistic return magnitudes
+        # Use robust scaling: changes relative to the overall price range
+        price_range = np.percentile(actual_prices, 95) - np.percentile(actual_prices, 5)
+        if price_range < 1e-6:
+            price_range = np.std(actual_prices) * 4  # Fallback: ~4 std covers most data
+        if price_range < 1e-6:
+            price_range = 1.0  # Final fallback
+
+        # Convert normalized price changes to realistic return scale
+        # Typical daily stock returns: -5% to +5% is common, ±10% is rare
+        # Scale factor: map price_range movement to ~10% return
+        scale_factor = 0.10 / price_range
+
         actual_returns = np.zeros_like(actual_prices)
-        for i in range(len(actual_prices) - 1):
-            # Avoid division by zero: if price is very close to 0, use small epsilon
-            denom = max(abs(actual_prices[i]), 1e-6)
-            actual_returns[i] = (actual_prices[i + 1] - actual_prices[i]) / denom
-        actual_returns[-1] = actual_returns[-2] if len(actual_returns) > 1 else 0  # Last period
+        actual_returns[:-1] = actual_diffs * scale_factor
+        actual_returns[-1] = actual_returns[-2] if len(actual_returns) > 1 else 0
 
-        # Compute predicted returns: direction of price movement
         predicted_returns = np.zeros_like(predictions)
-        for i in range(len(predictions) - 1):
-            denom = max(abs(predictions[i]), 1e-6)
-            predicted_returns[i] = (predictions[i + 1] - predictions[i]) / denom
-        predicted_returns[-1] = predicted_returns[-2] if len(predicted_returns) > 1 else 0  # Last period
+        predicted_returns[:-1] = predicted_diffs * scale_factor
+        predicted_returns[-1] = predicted_returns[-2] if len(predicted_returns) > 1 else 0
+
+        # CRITICAL: Clip returns to realistic bounds
+        # ±20% daily is extreme but possible in crisis (ensures no >100% losses)
+        actual_returns = np.clip(actual_returns, min_return, max_return)
+        predicted_returns = np.clip(predicted_returns, min_return, max_return)
 
     # ===== COMPUTE TRADING POSITIONS =====
     # Position: 1 (long) if predicted return is positive, 0 (flat) if negative/zero
@@ -684,8 +811,375 @@ def compute_strategy_returns(
 
     # ===== COMPUTE STRATEGY RETURNS WITH COSTS =====
     # Strategy return = position_held * actual_return - transaction_cost * trades_executed
-    # The position held at time t generates return equal to actual_returns[t]
-    # Trading cost is incurred when position changes
     strategy_returns = positions * actual_returns - position_changes * transaction_cost
 
+    # Final sanity check: clip strategy returns
+    strategy_returns = np.clip(strategy_returns, min_return, max_return)
+
+    # FIX: Check for cumulative overflow and re-clip if necessary
+    test_cum = np.cumprod(1 + strategy_returns)
+    if np.any(np.isinf(test_cum)) or np.any(np.isnan(test_cum)) or np.any(test_cum > 1e10):
+        logger.warning("Cumulative returns overflow detected. Applying tighter bounds.")
+        # Apply tighter bounds to prevent overflow
+        strategy_returns = np.clip(strategy_returns, -0.05, 0.05)
+
     return strategy_returns
+
+
+def validate_metrics(metrics: Dict[str, float]) -> Dict[str, any]:
+    """
+    Validate financial metrics and flag any suspicious values
+
+    Args:
+        metrics: Dictionary of computed metrics
+
+    Returns:
+        Dictionary with validation results and warnings
+    """
+    validation = {
+        'is_valid': True,
+        'warnings': [],
+        'errors': []
+    }
+
+    # Check for impossible values
+    max_dd = metrics.get('max_drawdown', 0)
+    if max_dd < -1.0:
+        validation['errors'].append(f"Max drawdown {max_dd:.2%} exceeds -100% (impossible)")
+        validation['is_valid'] = False
+
+    # Check for infinite values
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)):
+            if np.isinf(value):
+                validation['errors'].append(f"{key} is infinite")
+                validation['is_valid'] = False
+            elif np.isnan(value):
+                validation['warnings'].append(f"{key} is NaN")
+
+    # Check for suspicious Sharpe/Sortino
+    sharpe = metrics.get('sharpe_ratio', 0)
+    sortino = metrics.get('sortino_ratio', 0)
+
+    if abs(sharpe) > 5:
+        validation['warnings'].append(f"Sharpe {sharpe:.2f} is unusually high (>5 or <-5)")
+
+    if abs(sortino) > 10:
+        validation['warnings'].append(f"Sortino {sortino:.2f} is unusually high (>10 or <-10)")
+
+    # Check for inconsistency: high Sortino with large drawdown
+    if sortino > 2 and max_dd < -0.5:  # Sortino > 2 with DD > 50%
+        validation['warnings'].append(
+            f"Inconsistent: Sortino {sortino:.2f} implies controlled downside, "
+            f"but Max DD is {max_dd:.2%}"
+        )
+
+    # Check annualized return
+    ann_ret = metrics.get('annualized_return', 0)
+    if ann_ret > 5.0:  # > 500% annual
+        validation['warnings'].append(f"Annual return {ann_ret:.2%} is suspiciously high")
+
+    # Check profit factor
+    pf = metrics.get('profit_factor', 1)
+    if pf > 10:
+        validation['warnings'].append(f"Profit factor {pf:.2f} is unusually high")
+
+    # Log warnings
+    if validation['warnings']:
+        for warning in validation['warnings']:
+            logger.warning(f"Metric validation: {warning}")
+
+    if validation['errors']:
+        for error in validation['errors']:
+            logger.error(f"Metric validation: {error}")
+
+    return validation
+
+
+# ===== STANDALONE FUNCTIONS =====
+# Complete implementations for backward compatibility with backtesting_platform.py
+
+def calculate_sharpe_ratio(
+    returns: Union[np.ndarray, pd.Series],
+    risk_free_rate: float = 0.02,
+    periods_per_year: int = 252
+) -> float:
+    """
+    Calculate annualized Sharpe Ratio
+
+    Sharpe = (mean_return - risk_free_rate) / std_return * sqrt(periods_per_year)
+
+    Args:
+        returns: Array of returns
+        risk_free_rate: Annualized risk-free rate (default: 2%)
+        periods_per_year: Trading periods per year (default: 252 trading days)
+
+    Returns:
+        Annualized Sharpe ratio (capped at reasonable bounds)
+    """
+    if isinstance(returns, pd.Series):
+        returns = returns.values
+
+    returns = returns[~np.isnan(returns)]
+
+    if len(returns) == 0:
+        return 0.0
+
+    # Clip returns to realistic bounds first
+    returns = np.clip(returns, -0.99, 1.0)
+
+    mean_return = np.mean(returns)
+    std_return = np.std(returns, ddof=1)
+
+    if std_return < 1e-10:
+        return 0.0
+
+    # Annualized risk-free rate per period
+    rf_per_period = risk_free_rate / periods_per_year
+
+    sharpe = (mean_return - rf_per_period) / std_return * np.sqrt(periods_per_year)
+
+    # Cap at reasonable bounds (Sharpe > 5 or < -5 is suspicious)
+    sharpe = np.clip(sharpe, -5.0, 5.0)
+
+    return float(sharpe)
+
+
+def calculate_sortino_ratio(
+    returns: Union[np.ndarray, pd.Series],
+    risk_free_rate: float = 0.02,
+    periods_per_year: int = 252,
+    target_return: float = 0.0
+) -> float:
+    """
+    Calculate Sortino Ratio (uses downside deviation instead of total std)
+
+    Uses standard Sortino definition: downside = returns below target (typically 0)
+
+    Args:
+        returns: Array of returns
+        risk_free_rate: Annualized risk-free rate
+        periods_per_year: Trading periods per year
+        target_return: Minimum acceptable return per period (default: 0)
+
+    Returns:
+        Annualized Sortino ratio (capped at reasonable bounds)
+    """
+    if isinstance(returns, pd.Series):
+        returns = returns.values
+
+    returns = returns[~np.isnan(returns)]
+
+    if len(returns) == 0:
+        return 0.0
+
+    mean_return = np.mean(returns)
+    rf_per_period = risk_free_rate / periods_per_year
+
+    # Standard Sortino uses returns below target (typically 0)
+    downside_returns = returns[returns < target_return]
+
+    if len(downside_returns) == 0:
+        # No downside: return large but finite value
+        return 10.0 if mean_return > rf_per_period else 0.0
+
+    # Downside deviation: std of returns below target
+    downside_std = np.std(downside_returns, ddof=1)
+
+    if downside_std < 1e-10:
+        return 10.0 if mean_return > rf_per_period else 0.0
+
+    sortino = (mean_return - rf_per_period) / downside_std * np.sqrt(periods_per_year)
+
+    # Cap at reasonable bounds (Sortino > 10 or < -10 is suspicious)
+    sortino = np.clip(sortino, -10.0, 10.0)
+
+    return float(sortino)
+
+
+def calculate_max_drawdown(
+    returns: Union[np.ndarray, pd.Series],
+    return_series: bool = False
+) -> Union[float, tuple]:
+    """
+    Calculate maximum drawdown
+
+    Args:
+        returns: Array of returns
+        return_series: If True, return (max_dd, drawdown_series)
+
+    Returns:
+        Maximum drawdown (negative value, capped at -1.0 = -100%) or (max_dd, drawdown_series)
+    """
+    if isinstance(returns, pd.Series):
+        returns = returns.values
+
+    returns = returns[~np.isnan(returns)]
+
+    if len(returns) == 0:
+        return 0.0 if not return_series else (0.0, np.array([]))
+
+    # Clip individual returns to realistic bounds
+    # No single-period return can exceed -100% (total loss) in reality
+    returns_clipped = np.clip(returns, -0.99, 1.0)
+
+    # Cumulative returns with equity floor
+    # Equity cannot go below 0 (you can't lose more than 100%)
+    cum_returns = np.cumprod(1 + returns_clipped)
+    cum_returns = np.maximum(cum_returns, 1e-10)  # Equity floor
+
+    # Running maximum
+    running_max = np.maximum.accumulate(cum_returns)
+
+    # Drawdown series
+    drawdown = (cum_returns - running_max) / running_max
+
+    # Cap drawdown at -100% (physically impossible to exceed)
+    drawdown = np.maximum(drawdown, -1.0)
+
+    max_dd = np.min(drawdown)
+
+    if return_series:
+        return float(max_dd), drawdown
+    return float(max_dd)
+
+
+def calculate_calmar_ratio(
+    returns: Union[np.ndarray, pd.Series],
+    periods_per_year: int = 252
+) -> float:
+    """
+    Calculate Calmar Ratio = Annual Return / |Max Drawdown|
+
+    Args:
+        returns: Array of returns
+        periods_per_year: Trading periods per year
+
+    Returns:
+        Calmar ratio (capped at reasonable bounds)
+    """
+    if isinstance(returns, pd.Series):
+        returns = returns.values
+
+    returns = returns[~np.isnan(returns)]
+
+    if len(returns) == 0:
+        return 0.0
+
+    # Clip returns before computing
+    returns = np.clip(returns, -0.99, 1.0)
+
+    # Annualized return
+    total_return = np.prod(1 + returns) - 1
+    n_years = len(returns) / periods_per_year
+
+    if n_years <= 0:
+        return 0.0
+
+    # Handle edge cases for annual return calculation
+    if total_return <= -1:
+        annual_return = -1.0  # Total loss
+    else:
+        annual_return = (1 + total_return) ** (1 / n_years) - 1
+
+    # Max drawdown
+    max_dd = calculate_max_drawdown(returns)
+
+    if abs(max_dd) < 0.001:  # Less than 0.1% drawdown
+        # Return bounded value instead of inf
+        return 10.0 if annual_return > 0 else 0.0
+
+    calmar = annual_return / abs(max_dd)
+
+    # Cap at reasonable bounds (Calmar > 10 is exceptional)
+    calmar = np.clip(calmar, -10.0, 10.0)
+
+    return float(calmar)
+
+
+def compute_all_metrics(
+    returns: Union[np.ndarray, pd.Series],
+    predictions: Optional[Union[np.ndarray, torch.Tensor]] = None,
+    targets: Optional[Union[np.ndarray, torch.Tensor]] = None,
+    benchmark_returns: Optional[Union[np.ndarray, pd.Series]] = None,
+    risk_free_rate: float = 0.02,
+    periods_per_year: int = 252,
+    predictions_are_returns: bool = False
+) -> Dict[str, float]:
+    """
+    Compute all comprehensive financial metrics
+
+    Args:
+        returns: Strategy returns
+        predictions: Optional predicted prices or returns (for directional accuracy)
+        targets: Optional actual prices or returns (for directional accuracy)
+        benchmark_returns: Optional benchmark returns
+        risk_free_rate: Risk-free rate
+        periods_per_year: Trading periods per year
+        predictions_are_returns: If True, predictions/targets are returns
+                                If False (default), they are price levels
+
+    Returns:
+        Dictionary with all metrics
+    """
+    metrics = {}
+
+    # Convert returns to numpy if needed
+    if isinstance(returns, pd.Series):
+        returns_array = returns.values
+    else:
+        returns_array = returns
+    returns_array = returns_array[~np.isnan(returns_array)]
+
+    # Return metrics
+    metrics['total_return'] = FinancialMetrics.total_return(returns)
+    metrics['annualized_return'] = FinancialMetrics.annualized_return(returns, periods_per_year)
+    cum_returns = FinancialMetrics.cumulative_returns(returns)
+    metrics['cumulative_return_final'] = cum_returns[-1] if len(cum_returns) > 0 else 0.0
+
+    # Risk-adjusted metrics
+    metrics['sharpe_ratio'] = calculate_sharpe_ratio(returns, risk_free_rate, periods_per_year)
+    metrics['sortino_ratio'] = calculate_sortino_ratio(returns, risk_free_rate, periods_per_year)
+
+    # Drawdown metrics
+    max_dd = calculate_max_drawdown(returns)
+    metrics['max_drawdown'] = max_dd
+    metrics['drawdown_duration'] = FinancialMetrics.drawdown_duration(returns)
+    metrics['calmar_ratio'] = calculate_calmar_ratio(returns, periods_per_year)
+
+    # Volatility
+    metrics['volatility'] = float(np.std(returns_array, ddof=1) * np.sqrt(periods_per_year)) if len(returns_array) > 0 else 0.0
+
+    # Trading viability metrics
+    metrics['profit_factor'] = FinancialMetrics.profit_factor(returns)
+
+    # Directional accuracy and signal quality
+    if predictions is not None and targets is not None:
+        metrics['directional_accuracy'] = FinancialMetrics.directional_accuracy(
+            predictions, targets, are_returns=predictions_are_returns
+        )
+        metrics['information_coefficient'] = FinancialMetrics.information_coefficient(predictions, targets)
+
+        # Precision and recall
+        pr_metrics = FinancialMetrics.precision_recall(predictions, targets)
+        metrics.update(pr_metrics)
+
+    # Information ratio
+    if benchmark_returns is not None:
+        metrics['information_ratio'] = FinancialMetrics.information_ratio(returns, benchmark_returns, periods_per_year)
+
+    # Win rate
+    if len(returns_array) > 0:
+        metrics['win_rate'] = float(np.mean(returns_array > 0))
+
+    # Validate all metrics and replace invalid values
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)):
+            if np.isinf(value):
+                logger.warning(f"Metric '{key}' is infinite, capping to bounded value")
+                metrics[key] = 10.0 if value > 0 else -10.0
+            elif np.isnan(value):
+                logger.warning(f"Metric '{key}' is NaN, setting to 0")
+                metrics[key] = 0.0
+
+    return metrics

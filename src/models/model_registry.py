@@ -1,14 +1,18 @@
 """
 Model Registry - Central registry for all neural network models
 
-Tracks all available models, their training status, and metadata
+Tracks all available models, their training status, and metadata.
+Provides model loading functionality from checkpoints.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 from dataclasses import dataclass
 import json
 from datetime import datetime
+
+import torch
+import torch.nn as nn
 
 from ..utils.logger import get_logger
 
@@ -179,8 +183,16 @@ class ModelRegistry:
                 self.models_dir / f'{model_key}_best.pt',
                 self.models_dir / f'{model_key}_best.pth',
                 self.models_dir / f'pinn_{model_key}_best.pt',
+                # Advanced PINN architectures (stacked/residual)
                 self.models_dir / 'stacked_pinn' / f'{model_key}_pinn_best.pt',
+                self.models_dir / 'stacked_pinn' / f'{model_key}_best.pt',
             ]
+
+            # Special handling for stacked/residual PINN models
+            if model_key == 'stacked':
+                possible_paths.insert(0, self.models_dir / 'stacked_pinn' / 'stacked_pinn_best.pt')
+            elif model_key == 'residual':
+                possible_paths.insert(0, self.models_dir / 'stacked_pinn' / 'residual_pinn_best.pt')
 
             for path in possible_paths:
                 if path.exists():
@@ -190,6 +202,8 @@ class ModelRegistry:
 
                     # Try to read epochs from results
                     results_path = self.results_dir / f'{model_key}_results.json'
+                    if not results_path.exists():
+                        results_path = self.results_dir / f'pinn_{model_key}_results.json'
                     if not results_path.exists():
                         results_path = self.results_dir / 'pinn_comparison' / f'{model_key}_results.json'
                     if not results_path.exists():
@@ -203,8 +217,8 @@ class ModelRegistry:
                                 if 'history' in results and 'train_loss' in results['history']:
                                     model_info.epochs_trained = len(results['history']['train_loss'])
                                 model_info.results_path = results_path
-                        except:
-                            pass
+                        except (json.JSONDecodeError, IOError, KeyError) as e:
+                            logger.debug(f"Could not load results from {results_path}: {e}")
                     else:
                         # Try loading from detailed_results.json for PINN models
                         detailed_path = self.results_dir / 'pinn_comparison' / 'detailed_results.json'
@@ -218,8 +232,8 @@ class ModelRegistry:
                                                 model_info.epochs_trained = len(variant_result['history']['train_loss'])
                                             model_info.results_path = detailed_path
                                             break
-                            except:
-                                pass
+                            except (json.JSONDecodeError, IOError, KeyError) as e:
+                                logger.debug(f"Could not load detailed results: {e}")
                     break
 
     def get_all_models(self) -> Dict[str, ModelInfo]:
@@ -241,6 +255,187 @@ class ModelRegistry:
     def get_model_info(self, model_key: str) -> Optional[ModelInfo]:
         """Get info for a specific model"""
         return self.models.get(model_key)
+
+    def load_model(
+        self,
+        model_key: str,
+        device: Optional[torch.device] = None,
+        input_dim: int = 5
+    ) -> Optional[nn.Module]:
+        """
+        Load a trained model from checkpoint
+
+        Args:
+            model_key: The model key (e.g., 'lstm', 'pinn_global', 'stacked')
+            device: Device to load model on (default: CPU)
+            input_dim: Input feature dimension (default: 5)
+
+        Returns:
+            Loaded model or None if not found/trained
+        """
+        model_info = self.get_model_info(model_key)
+
+        if model_info is None:
+            logger.error(f"Model '{model_key}' not found in registry")
+            return None
+
+        if not model_info.trained or model_info.checkpoint_path is None:
+            logger.error(f"Model '{model_key}' is not trained or checkpoint not found")
+            return None
+
+        device = device or torch.device('cpu')
+
+        try:
+            # Load checkpoint
+            checkpoint = torch.load(model_info.checkpoint_path, map_location=device)
+
+            # Instantiate model based on architecture
+            model = self._instantiate_model(model_info, input_dim)
+
+            if model is None:
+                return None
+
+            # Load state dict
+            model.load_state_dict(checkpoint['model_state_dict'])
+            model.to(device)
+            model.eval()
+
+            logger.info(f"Loaded model '{model_key}' from {model_info.checkpoint_path}")
+            return model
+
+        except Exception as e:
+            logger.error(f"Failed to load model '{model_key}': {e}")
+            return None
+
+    def _instantiate_model(
+        self,
+        model_info: ModelInfo,
+        input_dim: int
+    ) -> Optional[nn.Module]:
+        """
+        Instantiate a model based on its architecture
+
+        Args:
+            model_info: Model information
+            input_dim: Input feature dimension
+
+        Returns:
+            Instantiated model (not loaded with weights yet)
+        """
+        architecture = model_info.architecture
+        physics = model_info.physics_constraints or {}
+
+        try:
+            if architecture == 'LSTM':
+                from .baseline import LSTMModel
+                return LSTMModel(
+                    input_dim=input_dim,
+                    hidden_dim=128,
+                    num_layers=2,
+                    output_dim=1,
+                    dropout=0.2
+                )
+
+            elif architecture == 'GRU':
+                from .baseline import GRUModel
+                return GRUModel(
+                    input_dim=input_dim,
+                    hidden_dim=128,
+                    num_layers=2,
+                    output_dim=1,
+                    dropout=0.2
+                )
+
+            elif architecture == 'BiLSTM':
+                from .baseline import LSTMModel
+                return LSTMModel(
+                    input_dim=input_dim,
+                    hidden_dim=128,
+                    num_layers=2,
+                    output_dim=1,
+                    dropout=0.2,
+                    bidirectional=True
+                )
+
+            elif architecture == 'AttentionLSTM':
+                from .baseline import LSTMModel
+                # Attention LSTM uses same base with attention layer
+                return LSTMModel(
+                    input_dim=input_dim,
+                    hidden_dim=128,
+                    num_layers=2,
+                    output_dim=1,
+                    dropout=0.2
+                )
+
+            elif architecture == 'Transformer':
+                from .baseline import TransformerModel
+                return TransformerModel(
+                    input_dim=input_dim,
+                    d_model=64,
+                    nhead=4,
+                    num_layers=2,
+                    dropout=0.2
+                )
+
+            elif architecture == 'PINN':
+                from .pinn import PINNModel
+                return PINNModel(
+                    input_dim=input_dim,
+                    hidden_dim=128,
+                    num_layers=2,
+                    output_dim=1,
+                    dropout=0.2,
+                    base_model='lstm',
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.0),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_langevin=physics.get('lambda_langevin', 0.0)
+                )
+
+            elif architecture == 'StackedPINN':
+                from .stacked_pinn import StackedPINN
+                return StackedPINN(
+                    input_dim=input_dim,
+                    physics_hidden=64,
+                    lstm_hidden=128,
+                    gru_hidden=128,
+                    num_layers=2,
+                    output_dim=1,
+                    dropout=0.2,
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1)
+                )
+
+            elif architecture == 'ResidualPINN':
+                from .stacked_pinn import ResidualPINN
+                return ResidualPINN(
+                    input_dim=input_dim,
+                    hidden_dim=128,
+                    num_layers=2,
+                    output_dim=1,
+                    dropout=0.2,
+                    base_model='lstm',
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1)
+                )
+
+            else:
+                logger.error(f"Unknown architecture: {architecture}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to instantiate model: {e}")
+            return None
+
+    def get_available_models_for_inference(self) -> List[str]:
+        """
+        Get list of model keys that are available for inference (trained)
+
+        Returns:
+            List of model keys
+        """
+        return [k for k, v in self.models.items() if v.trained]
 
     def refresh_status(self):
         """Refresh training status for all models"""

@@ -54,6 +54,7 @@ class PhysicsEquationValidator:
         """
         self.data_dir = data_dir
         self.results = []
+        self._combined_data = None  # Cache for combined parquet file
 
         # Sector classifications (S&P 500 examples)
         self.sectors = {
@@ -65,6 +66,24 @@ class PhysicsEquationValidator:
             'Energy': ['XOM', 'CVX', 'COP', 'SLB', 'EOG']
         }
 
+    def _load_combined_data(self) -> pd.DataFrame:
+        """Load and cache the combined parquet file"""
+        if self._combined_data is not None:
+            return self._combined_data
+
+        # Look for combined parquet files
+        for pattern in ['stock_prices_*.parquet', '*.parquet']:
+            files = list(self.data_dir.glob(pattern))
+            for f in files:
+                if f.name != '.gitkeep':
+                    try:
+                        self._combined_data = pd.read_parquet(f)
+                        logger.info(f"Loaded combined data from {f.name}: {len(self._combined_data)} rows")
+                        return self._combined_data
+                    except Exception as e:
+                        logger.debug(f"Could not read {f}: {e}")
+        return None
+
     def load_price_data(self, ticker: str) -> pd.DataFrame:
         """
         Load historical price data for a ticker
@@ -75,15 +94,24 @@ class PhysicsEquationValidator:
         Returns:
             DataFrame with price data
         """
+        # First try individual ticker file
         parquet_path = self.data_dir / f"{ticker}.parquet"
 
         if parquet_path.exists():
             df = pd.read_parquet(parquet_path)
             logger.info(f"Loaded {len(df)} rows for {ticker}")
             return df
-        else:
-            logger.warning(f"Data not found for {ticker}")
-            return None
+
+        # Try combined parquet file
+        combined = self._load_combined_data()
+        if combined is not None and 'ticker' in combined.columns:
+            ticker_data = combined[combined['ticker'] == ticker].copy()
+            if len(ticker_data) > 0:
+                logger.info(f"Loaded {len(ticker_data)} rows for {ticker} from combined file")
+                return ticker_data
+
+        logger.warning(f"Data not found for {ticker}")
+        return None
 
     def compute_returns(self, prices: pd.Series) -> pd.Series:
         """
@@ -172,7 +200,8 @@ class PhysicsEquationValidator:
             model = sm.OLS(y, X).fit()
             from statsmodels.stats.diagnostic import het_breuschpagan
             bp_stat, bp_pvalue, _, _ = het_breuschpagan(model.resid, X)
-        except:
+        except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
+            logger.debug(f"Breusch-Pagan test failed: {e}")
             bp_stat, bp_pvalue = np.nan, np.nan
 
         result = {
@@ -262,7 +291,8 @@ class PhysicsEquationValidator:
             else:
                 theta = np.nan
 
-        except:
+        except (ValueError, np.linalg.LinAlgError, RuntimeError, IndexError) as e:
+            logger.debug(f"AR(1) regression failed: {e}")
             alpha, beta, beta_pvalue, half_life, theta = np.nan, np.nan, np.nan, np.nan, np.nan
 
         result = {

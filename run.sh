@@ -93,7 +93,11 @@ show_menu() {
     echo "12) Train Baseline Models (LSTM, GRU, BiLSTM, Attention, Transformer)"
     echo "13) Compute Financial Metrics (All Models)"
     echo "14) View Metrics in Terminal"
-    echo "15) Exit"
+    echo "15) Evaluate Stacked/Residual PINN (Generate Metrics)"
+    echo "16) Launch Backtesting Dashboard"
+    echo "17) Recompute All Metrics (Fix Consistency)"
+    echo "18) Launch Training Visualizations Dashboard"
+    echo "19) Exit"
     echo ""
 }
 
@@ -760,9 +764,9 @@ run_pinn_comparison() {
     echo ""
 }
 
-# Function to run full model pipeline (all 13 models)
+# Function to run full model pipeline (all 14 models)
 run_full_model_pipeline() {
-    section_header "Full Model Pipeline: All 13 Neural Network Models"
+    section_header "Full Model Pipeline: All 14 Neural Network Models"
     debug_msg "Starting comprehensive full model pipeline..."
 
     FULL_PIPELINE_START=$SECONDS
@@ -797,7 +801,7 @@ run_full_model_pipeline() {
     echo "    • Comprehensive financial metrics for all models"
     echo "    • Launch interactive web dashboard"
     echo ""
-    echo "  Total: 13 models with unified evaluation"
+    echo "  Total: 14 models with unified evaluation"
     echo ""
 
     read -p "Enter number of epochs for baseline/PINN models (default: 100): " epochs
@@ -994,7 +998,30 @@ run_full_model_pipeline() {
     fi
     echo ""
 
-    # Compute financial metrics for all models
+    # Evaluate Stacked/Residual PINN models first (generates results in dashboard format)
+    if [ -f "evaluate_stacked_pinn.py" ]; then
+        echo -e "${BLUE}$(timestamp) Evaluating Stacked/Residual PINN models...${NC}"
+        debug_msg "Command: python3 evaluate_stacked_pinn.py"
+        STACKED_EVAL_START=$SECONDS
+
+        if python3 evaluate_stacked_pinn.py 2>&1 | while IFS= read -r line; do
+            echo "$line"
+            if [[ "$line" =~ "Evaluating" ]] || [[ "$line" =~ "✓" ]] || [[ "$line" =~ "Saved" ]]; then
+                debug_msg "stacked_eval: $line"
+            fi
+        done; then
+            STACKED_EVAL_TIME=$((SECONDS - STACKED_EVAL_START))
+            echo ""
+            echo -e "${GREEN}$(timestamp) ✓ Stacked/Residual PINN evaluation completed (${STACKED_EVAL_TIME}s)${NC}"
+            debug_msg "Stacked PINN evaluation completed in $STACKED_EVAL_TIME seconds"
+        else
+            echo -e "${YELLOW}$(timestamp) Warning: Stacked/Residual PINN evaluation had issues${NC}"
+            debug_msg "Stacked PINN evaluation failed"
+        fi
+        echo ""
+    fi
+
+    # Compute financial metrics for all models (including stacked/residual)
     if [ -f "compute_all_financial_metrics.py" ]; then
         echo -e "${BLUE}$(timestamp) Computing comprehensive financial metrics (Sharpe, Sortino, etc.)...${NC}"
         debug_msg "Command: python3 compute_all_financial_metrics.py"
@@ -1051,11 +1078,11 @@ run_full_model_pipeline() {
     echo -e "${CYAN}  • Training time: ${ADVANCED_TIME}s ($((ADVANCED_TIME / 60))m)${NC}"
     echo ""
     echo "Overall Statistics:"
-    echo -e "${CYAN}  • Total models trained: $TRAINED_COUNT/13${NC}"
+    echo -e "${CYAN}  • Total models trained: $TRAINED_COUNT/14${NC}"
     echo -e "${CYAN}  • Epochs (baseline/PINN): $epochs${NC}"
     echo -e "${CYAN}  • Epochs (advanced): $advanced_epochs${NC}"
     echo -e "${CYAN}  • Total execution time: ${TOTAL_PIPELINE_TIME}s ($((TOTAL_PIPELINE_TIME / 60))m $((TOTAL_PIPELINE_TIME % 60))s)${NC}"
-    echo -e "${CYAN}  • Average per model: $((TOTAL_PIPELINE_TIME / 13))s${NC}"
+    echo -e "${CYAN}  • Average per model: $((TOTAL_PIPELINE_TIME / 14))s${NC}"
     echo ""
     echo "========================================"
     debug_msg "Full pipeline completed in $TOTAL_PIPELINE_TIME seconds"
@@ -1066,7 +1093,7 @@ run_full_model_pipeline() {
     echo -e "${YELLOW}$(timestamp) Launching All Models Dashboard...${NC}"
     echo ""
     echo "The dashboard provides:"
-    echo "  • Training status for all 13 models (✅ trained / ⚪ untrained)"
+    echo "  • Training status for all 14 models (✅ trained / ⚪ untrained)"
     echo "  • Comprehensive financial metrics (15+ metrics)"
     echo "  • Multi-category comparison (Risk, Capital, Trading, Signal)"
     echo "  • Interactive visualizations"
@@ -1175,6 +1202,25 @@ compute_financial_metrics() {
         return 1
     fi
 
+    # First, evaluate Stacked/Residual PINN if models exist
+    if [ -f "evaluate_stacked_pinn.py" ] && [ -d "models/stacked_pinn" ]; then
+        echo -e "${BLUE}$(timestamp) Step 1: Evaluating Stacked/Residual PINN models...${NC}"
+        debug_msg "Command: python3 evaluate_stacked_pinn.py"
+
+        if python3 evaluate_stacked_pinn.py 2>&1 | while IFS= read -r line; do
+            echo "$line"
+            if [[ "$line" =~ "Evaluating" ]] || [[ "$line" =~ "✓" ]] || [[ "$line" =~ "Saved" ]]; then
+                debug_msg "stacked_eval: $line"
+            fi
+        done; then
+            echo -e "${GREEN}$(timestamp) ✓ Stacked/Residual PINN evaluated${NC}"
+        else
+            echo -e "${YELLOW}$(timestamp) Warning: Stacked/Residual evaluation had issues${NC}"
+        fi
+        echo ""
+    fi
+
+    echo -e "${BLUE}$(timestamp) Step 2: Computing metrics for all models...${NC}"
     debug_msg "Command: python3 compute_all_financial_metrics.py"
     METRICS_START=$SECONDS
 
@@ -1272,6 +1318,225 @@ view_metrics_terminal() {
     debug_msg "Metrics viewer session finished"
 }
 
+# Function to evaluate stacked/residual PINN models
+evaluate_stacked_residual_pinn() {
+    section_header "Evaluating Stacked/Residual PINN Models"
+    debug_msg "Starting stacked/residual PINN evaluation..."
+
+    echo -e "${YELLOW}$(timestamp) Evaluating Stacked/Residual PINN models...${NC}"
+    echo ""
+    echo "This will:"
+    echo "  • Load trained StackedPINN and ResidualPINN models"
+    echo "  • Generate predictions on test data"
+    echo "  • Compute comprehensive ML and financial metrics"
+    echo "  • Save results in dashboard-compatible format"
+    echo ""
+
+    # Check if evaluation script exists
+    if [ ! -f "evaluate_stacked_pinn.py" ]; then
+        echo -e "${RED}$(timestamp) [ERROR] evaluate_stacked_pinn.py not found${NC}"
+        debug_msg "Stacked PINN evaluation script not found"
+        return 1
+    fi
+
+    # Check if models exist
+    if [ ! -d "models/stacked_pinn" ]; then
+        echo -e "${RED}$(timestamp) [ERROR] models/stacked_pinn directory not found${NC}"
+        echo -e "${YELLOW}Train models first with: ./run.sh → Option 11${NC}"
+        debug_msg "Stacked PINN models directory not found"
+        return 1
+    fi
+
+    debug_msg "Command: python3 evaluate_stacked_pinn.py"
+    EVAL_START=$SECONDS
+
+    echo -e "${CYAN}$(timestamp) Running evaluation...${NC}"
+    echo ""
+
+    if python3 evaluate_stacked_pinn.py 2>&1 | while IFS= read -r line; do
+        echo "$line"
+        if [[ "$line" =~ "Evaluating" ]] || [[ "$line" =~ "✓" ]] || [[ "$line" =~ "Saved" ]] || [[ "$line" =~ "RMSE" ]] || [[ "$line" =~ "Sharpe" ]]; then
+            debug_msg "eval: $line"
+        fi
+    done; then
+        EVAL_TIME=$((SECONDS - EVAL_START))
+        echo ""
+        echo -e "${GREEN}$(timestamp) ✓ Stacked/Residual PINN evaluation completed (${EVAL_TIME}s)${NC}"
+        debug_msg "Evaluation completed in $EVAL_TIME seconds"
+    else
+        echo -e "${RED}$(timestamp) [ERROR] Evaluation failed${NC}"
+        debug_msg "Stacked/Residual PINN evaluation failed"
+        return 1
+    fi
+
+    echo ""
+    echo -e "${CYAN}Results saved to:${NC}"
+    echo "  • results/pinn_stacked_results.json"
+    echo "  • results/pinn_residual_results.json"
+    echo "  • results/pinn_stacked_predictions.npz"
+    echo "  • results/pinn_residual_predictions.npz"
+    echo ""
+    echo -e "${YELLOW}Next steps:${NC}"
+    echo "  • View in dashboard: streamlit run src/web/app.py"
+    echo "  • Navigate to 'PINN Comparison' or 'All Models Dashboard'"
+    echo ""
+}
+
+# Function to launch backtesting dashboard
+launch_backtesting_dashboard() {
+    section_header "Launching Backtesting Dashboard"
+    debug_msg "Starting backtesting dashboard..."
+
+    # Check if backtesting dashboard exists
+    if [ ! -f "src/web/backtesting_dashboard.py" ]; then
+        echo -e "${RED}$(timestamp) [ERROR] src/web/backtesting_dashboard.py not found${NC}"
+        debug_msg "Backtesting dashboard file missing"
+        return 1
+    fi
+
+    debug_msg "Backtesting dashboard file found: $(pwd)/src/web/backtesting_dashboard.py"
+
+    echo -e "${YELLOW}$(timestamp) Launching backtesting dashboard...${NC}"
+    echo ""
+    echo "The Backtesting Dashboard provides:"
+    echo "  • Multiple strategy comparison (Buy & Hold, SMA, Momentum, Mean Reversion)"
+    echo "  • Transaction cost modeling (Commission, Slippage)"
+    echo "  • Risk management (Stop-loss, Take-profit)"
+    echo "  • Position sizing methods (Fixed, Kelly, Volatility-based)"
+    echo "  • Equity curves and drawdown analysis"
+    echo "  • Walk-forward validation"
+    echo "  • Monte Carlo simulation"
+    echo ""
+    echo -e "${GREEN}$(timestamp) ✓ Starting Streamlit app at http://localhost:8502${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to stop${NC}"
+    debug_msg "Command: streamlit run src/web/backtesting_dashboard.py --server.port 8502"
+
+    streamlit run src/web/backtesting_dashboard.py --server.port 8502
+}
+
+# Function to recompute all metrics for consistency
+recompute_all_metrics() {
+    section_header "Recomputing All Metrics for Consistency"
+    debug_msg "Starting metrics recomputation..."
+
+    echo -e "${YELLOW}$(timestamp) Recomputing financial metrics for all trained models...${NC}"
+    echo ""
+    echo "This will:"
+    echo "  • Re-run evaluation using unified evaluation pipeline"
+    echo "  • Fix any inconsistencies between result files"
+    echo "  • Validate all metrics and replace invalid values (inf/nan)"
+    echo "  • Ensure max_drawdown is capped at -100%"
+    echo "  • Apply overflow protection to cumulative returns"
+    echo ""
+
+    # Check if recompute script exists
+    if [ ! -f "recompute_metrics.py" ]; then
+        echo -e "${RED}$(timestamp) [ERROR] recompute_metrics.py not found${NC}"
+        debug_msg "Recompute metrics script not found"
+        return 1
+    fi
+
+    echo "Select mode:"
+    echo "1) Validate only (no changes)"
+    echo "2) Recompute all models"
+    echo "3) Recompute specific models"
+    echo ""
+    read -p "Enter choice [1-3]: " recompute_choice
+    debug_msg "User selected recompute option: $recompute_choice"
+    echo ""
+
+    case $recompute_choice in
+        1)
+            debug_msg "Command: python3 recompute_metrics.py --validate-only"
+            RECOMPUTE_START=$SECONDS
+            if python3 recompute_metrics.py --validate-only 2>&1 | while IFS= read -r line; do
+                echo "$line"
+                debug_msg "validate: $line"
+            done; then
+                RECOMPUTE_TIME=$((SECONDS - RECOMPUTE_START))
+                echo -e "${GREEN}$(timestamp) ✓ Validation completed (${RECOMPUTE_TIME}s)${NC}"
+            else
+                echo -e "${RED}$(timestamp) Validation found issues${NC}"
+            fi
+            ;;
+        2)
+            debug_msg "Command: python3 recompute_metrics.py --force"
+            RECOMPUTE_START=$SECONDS
+            if python3 recompute_metrics.py --force 2>&1 | while IFS= read -r line; do
+                echo "$line"
+                if [[ "$line" =~ "Recomputing" ]] || [[ "$line" =~ "✓" ]] || [[ "$line" =~ "Updated" ]]; then
+                    debug_msg "recompute: $line"
+                fi
+            done; then
+                RECOMPUTE_TIME=$((SECONDS - RECOMPUTE_START))
+                echo -e "${GREEN}$(timestamp) ✓ Recomputation completed (${RECOMPUTE_TIME}s)${NC}"
+            else
+                echo -e "${RED}$(timestamp) Recomputation had errors${NC}"
+            fi
+            ;;
+        3)
+            echo "Available models:"
+            echo "  Baseline: lstm, gru, bilstm, attention_lstm, transformer"
+            echo "  PINN: pinn_baseline, pinn_gbm, pinn_ou, pinn_black_scholes, pinn_gbm_ou, pinn_global"
+            echo "  Advanced: pinn_stacked, pinn_residual"
+            echo ""
+            read -p "Enter model keys (space-separated): " model_keys
+            debug_msg "User selected models: $model_keys"
+            debug_msg "Command: python3 recompute_metrics.py --models $model_keys --force"
+            RECOMPUTE_START=$SECONDS
+            if python3 recompute_metrics.py --models $model_keys --force 2>&1 | while IFS= read -r line; do
+                echo "$line"
+                debug_msg "recompute: $line"
+            done; then
+                RECOMPUTE_TIME=$((SECONDS - RECOMPUTE_START))
+                echo -e "${GREEN}$(timestamp) ✓ Recomputation completed (${RECOMPUTE_TIME}s)${NC}"
+            else
+                echo -e "${RED}$(timestamp) Recomputation had errors${NC}"
+            fi
+            ;;
+        *)
+            echo -e "${RED}$(timestamp) Invalid option${NC}"
+            return 1
+            ;;
+    esac
+
+    echo ""
+    echo -e "${CYAN}Results updated in: results/*_results.json${NC}"
+    echo ""
+}
+
+# Function to launch training visualizations dashboard
+launch_training_visualizations() {
+    section_header "Launching Training Visualizations Dashboard"
+    debug_msg "Starting training visualizations dashboard..."
+
+    # Check if training dashboard exists
+    if [ ! -f "src/web/training_dashboard.py" ]; then
+        echo -e "${RED}$(timestamp) [ERROR] src/web/training_dashboard.py not found${NC}"
+        debug_msg "Training dashboard file missing"
+        return 1
+    fi
+
+    debug_msg "Training dashboard file found: $(pwd)/src/web/training_dashboard.py"
+
+    echo -e "${YELLOW}$(timestamp) Launching training visualizations dashboard...${NC}"
+    echo ""
+    echo "The Training Visualizations Dashboard provides:"
+    echo "  • Training overview with statistics for all models"
+    echo "  • Loss curves (train vs validation) for all models"
+    echo "  • Single model deep dive analysis"
+    echo "  • Learning rate schedule visualization"
+    echo "  • Overfitting detection and analysis"
+    echo "  • Convergence comparison across models"
+    echo "  • Physics loss decomposition (for PINN models)"
+    echo ""
+    echo -e "${GREEN}$(timestamp) ✓ Starting Streamlit app at http://localhost:8503${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to stop${NC}"
+    debug_msg "Command: streamlit run src/web/training_dashboard.py --server.port 8503"
+
+    streamlit run src/web/training_dashboard.py --server.port 8503
+}
+
 # Main loop
 debug_msg "Entering main menu loop"
 MENU_ITERATIONS=0
@@ -1281,7 +1546,7 @@ while true; do
     debug_msg "Menu iteration: $MENU_ITERATIONS"
 
     show_menu
-    read -p "$(echo -e ${CYAN})Enter your choice [1-15]: $(echo -e ${NC})" choice
+    read -p "$(echo -e ${CYAN})Enter your choice [1-19]: $(echo -e ${NC})" choice
     debug_msg "User selected option: $choice"
 
     case $choice in
@@ -1360,7 +1625,29 @@ while true; do
             debug_msg "Metrics viewer closed, returning to menu"
             ;;
         15)
-            debug_msg "Option 15: Exit selected"
+            debug_msg "Option 15: Evaluate Stacked/Residual PINN selected"
+            evaluate_stacked_residual_pinn
+            debug_msg "Stacked/Residual evaluation completed, returning to menu"
+            ;;
+        16)
+            debug_msg "Option 16: Launch Backtesting Dashboard selected"
+            launch_backtesting_dashboard
+            debug_msg "Backtesting dashboard closed, exiting menu"
+            break
+            ;;
+        17)
+            debug_msg "Option 17: Recompute All Metrics selected"
+            recompute_all_metrics
+            debug_msg "Metrics recomputation completed, returning to menu"
+            ;;
+        18)
+            debug_msg "Option 18: Launch Training Visualizations Dashboard selected"
+            launch_training_visualizations
+            debug_msg "Training visualizations dashboard closed, exiting menu"
+            break
+            ;;
+        19)
+            debug_msg "Option 19: Exit selected"
             echo -e "${GREEN}$(timestamp) Exiting...${NC}"
             debug_msg "Total menu iterations: $MENU_ITERATIONS"
             debug_msg "Total execution time: $SECONDS seconds"
@@ -1369,7 +1656,7 @@ while true; do
             ;;
         *)
             debug_msg "Invalid option entered: $choice"
-            echo -e "${RED}$(timestamp) [ERROR] Invalid option. Please select 1-15${NC}"
+            echo -e "${RED}$(timestamp) [ERROR] Invalid option. Please select 1-19${NC}"
             ;;
     esac
 done

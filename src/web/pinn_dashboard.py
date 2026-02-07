@@ -27,6 +27,7 @@ from src.utils.config import get_config
 from src.utils.logger import get_logger, ensure_logger_initialized
 from src.evaluation.financial_metrics import FinancialMetrics
 from src.evaluation.rolling_metrics import RollingPerformanceAnalyzer
+from src.web.metrics_calculator import StreamlitMetricsCalculator
 
 ensure_logger_initialized()
 logger = get_logger(__name__)
@@ -56,8 +57,10 @@ class PINNDashboard:
         """Load results for a specific model"""
         # Try multiple result file patterns
         patterns = [
+            self.results_dir / f'pinn_{model_key}_results.json',  # Most common pattern
             self.results_dir / f'{model_key}_results.json',
             self.results_dir / 'pinn_comparison' / f'{model_key}_results.json',
+            self.results_dir / 'pinn_comparison' / f'pinn_{model_key}_results.json',
             self.config.project_root / 'models' / 'stacked_pinn' / f'{model_key}_pinn_results.json'
         ]
 
@@ -87,6 +90,9 @@ class PINNDashboard:
                         if 'test_metrics' in variant_result and 'financial_metrics' not in variant_result:
                             variant_result['financial_metrics'] = variant_result['test_metrics']
 
+                        # FIX: Normalize metrics from detailed_results
+                        variant_result = self._normalize_metrics(variant_result)
+
                         all_results[variant_key] = variant_result
                         logger.info(f"Loaded results for {variant_result.get('variant_name', variant_key)}")
             except Exception as e:
@@ -97,10 +103,305 @@ class PINNDashboard:
             if model_key not in all_results:  # Only load if not already loaded from detailed_results
                 result = self.load_model_results(model_key)
                 if result:
+                    # FIX: Normalize metrics from individual files
+                    result = self._normalize_metrics(result)
                     all_results[model_key] = result
                     logger.info(f"Loaded results for {model_name}")
 
         return all_results
+
+    def _normalize_metrics(self, result: Dict) -> Dict:
+        """Normalize metrics from different result formats"""
+        # Ensure ml_metrics exists
+        if 'ml_metrics' not in result:
+            result['ml_metrics'] = {}
+
+        ml = result['ml_metrics']
+        test = result.get('test_metrics', {})
+        fin = result.get('financial_metrics', {})
+
+        # Copy test_metrics to ml_metrics if missing
+        if 'mse' not in ml:
+            rmse = test.get('test_rmse') or ml.get('rmse', 0)
+            ml['mse'] = rmse ** 2 if rmse else 0
+        if 'rmse' not in ml:
+            ml['rmse'] = test.get('test_rmse', 0)
+        if 'mae' not in ml:
+            ml['mae'] = test.get('test_mae', 0)
+        if 'r2' not in ml:
+            ml['r2'] = test.get('test_r2', 0)
+        if 'mape' not in ml:
+            ml['mape'] = test.get('test_mape', 0)
+
+        # FIX: Validate financial metrics - replace inf/nan
+        if 'financial_metrics' in result:
+            fm = result['financial_metrics']
+            for key, value in list(fm.items()):
+                if isinstance(value, (int, float)):
+                    if np.isinf(value) or value > 1e10 or value < -1e10:
+                        fm[key] = 10.0 if value > 0 else -10.0
+                    elif np.isnan(value):
+                        fm[key] = 0.0
+
+            # FIX: Ensure max_drawdown is capped at -100%
+            if fm.get('max_drawdown', 0) < -1.0:
+                fm['max_drawdown'] = -1.0
+
+        return result
+
+    def load_predictions(self, model_key: str) -> Optional[Dict[str, np.ndarray]]:
+        """
+        Load predictions and targets from .npz files
+
+        Args:
+            model_key: Model key (e.g., 'lstm', 'pinn_global', 'stacked')
+
+        Returns:
+            Dict with 'predictions' and 'targets' arrays, or None if not found
+        """
+        # Try multiple file patterns
+        patterns = [
+            self.results_dir / f'pinn_{model_key}_predictions.npz',
+            self.results_dir / f'{model_key}_predictions.npz',
+            self.results_dir / 'pinn_comparison' / f'{model_key}_predictions.npz',
+        ]
+
+        for path in patterns:
+            if path.exists():
+                try:
+                    data = np.load(path)
+                    return {
+                        'predictions': data['predictions'].flatten(),
+                        'targets': data['targets'].flatten()
+                    }
+                except Exception as e:
+                    logger.warning(f"Failed to load predictions from {path}: {e}")
+
+        return None
+
+    def render_prediction_comparison(self, all_results: Dict[str, Dict]):
+        """Render prediction vs actual comparison visualization"""
+        st.subheader("📈 Prediction vs Actual Comparison")
+
+        st.markdown("""
+        **Visual Analysis:**
+        Compare how well each model's predictions track actual values.
+        Closer alignment = better predictive accuracy.
+        """)
+
+        # Find models with available predictions
+        available_models = []
+        for model_key in PINN_VARIANTS.keys():
+            preds = self.load_predictions(model_key)
+            if preds is not None:
+                available_models.append(model_key)
+
+        # Also check baseline models
+        for baseline_key in ['lstm', 'gru', 'bilstm']:
+            preds = self.load_predictions(baseline_key)
+            if preds is not None and baseline_key not in available_models:
+                available_models.append(baseline_key)
+
+        if not available_models:
+            st.warning("No prediction files found. Run model evaluation to generate predictions.")
+            st.code("python run_evaluation.py")
+            return
+
+        # Model selection
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            model_a = st.selectbox(
+                "Model A",
+                available_models,
+                index=0,
+                format_func=lambda x: PINN_VARIANTS.get(x, x.upper())
+            )
+
+        with col2:
+            # Default to different model for model B
+            default_b = 1 if len(available_models) > 1 else 0
+            model_b = st.selectbox(
+                "Model B",
+                available_models,
+                index=default_b,
+                format_func=lambda x: PINN_VARIANTS.get(x, x.upper())
+            )
+
+        # Load predictions
+        preds_a = self.load_predictions(model_a)
+        preds_b = self.load_predictions(model_b)
+
+        if preds_a is None or preds_b is None:
+            st.error("Could not load predictions for selected models.")
+            return
+
+        # Create comparison plot
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                f'{PINN_VARIANTS.get(model_a, model_a.upper())} - Prediction vs Actual',
+                f'{PINN_VARIANTS.get(model_b, model_b.upper())} - Prediction vs Actual',
+                'Prediction Error Distribution',
+                'Scatter: Predictions vs Actuals'
+            ),
+            vertical_spacing=0.12,
+            horizontal_spacing=0.08
+        )
+
+        # Time series comparison for Model A
+        n_points = min(500, len(preds_a['predictions']))  # Limit for readability
+        x_range = list(range(n_points))
+
+        fig.add_trace(
+            go.Scatter(
+                x=x_range,
+                y=preds_a['targets'][:n_points],
+                mode='lines',
+                name='Actual',
+                line=dict(color='blue', width=1),
+                legendgroup='a'
+            ),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_range,
+                y=preds_a['predictions'][:n_points],
+                mode='lines',
+                name=f'{model_a} Pred',
+                line=dict(color='red', width=1, dash='dot'),
+                legendgroup='a'
+            ),
+            row=1, col=1
+        )
+
+        # Time series comparison for Model B
+        fig.add_trace(
+            go.Scatter(
+                x=x_range,
+                y=preds_b['targets'][:n_points],
+                mode='lines',
+                name='Actual',
+                line=dict(color='blue', width=1),
+                showlegend=False,
+                legendgroup='b'
+            ),
+            row=1, col=2
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_range,
+                y=preds_b['predictions'][:n_points],
+                mode='lines',
+                name=f'{model_b} Pred',
+                line=dict(color='green', width=1, dash='dot'),
+                legendgroup='b'
+            ),
+            row=1, col=2
+        )
+
+        # Error distribution
+        errors_a = preds_a['predictions'] - preds_a['targets']
+        errors_b = preds_b['predictions'] - preds_b['targets']
+
+        fig.add_trace(
+            go.Histogram(
+                x=errors_a,
+                name=f'{model_a} Error',
+                opacity=0.6,
+                marker_color='red',
+                nbinsx=50
+            ),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Histogram(
+                x=errors_b,
+                name=f'{model_b} Error',
+                opacity=0.6,
+                marker_color='green',
+                nbinsx=50
+            ),
+            row=2, col=1
+        )
+
+        # Scatter plot: predictions vs actuals
+        fig.add_trace(
+            go.Scatter(
+                x=preds_a['targets'],
+                y=preds_a['predictions'],
+                mode='markers',
+                name=model_a,
+                marker=dict(color='red', size=3, opacity=0.5)
+            ),
+            row=2, col=2
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=preds_b['targets'],
+                y=preds_b['predictions'],
+                mode='markers',
+                name=model_b,
+                marker=dict(color='green', size=3, opacity=0.5)
+            ),
+            row=2, col=2
+        )
+
+        # Add perfect prediction line
+        min_val = min(preds_a['targets'].min(), preds_b['targets'].min())
+        max_val = max(preds_a['targets'].max(), preds_b['targets'].max())
+        fig.add_trace(
+            go.Scatter(
+                x=[min_val, max_val],
+                y=[min_val, max_val],
+                mode='lines',
+                name='Perfect Prediction',
+                line=dict(color='gray', dash='dash')
+            ),
+            row=2, col=2
+        )
+
+        fig.update_layout(
+            height=800,
+            showlegend=True,
+            title_text="Prediction Comparison Analysis"
+        )
+
+        fig.update_xaxes(title_text="Time Step", row=1, col=1)
+        fig.update_xaxes(title_text="Time Step", row=1, col=2)
+        fig.update_xaxes(title_text="Prediction Error", row=2, col=1)
+        fig.update_xaxes(title_text="Actual Value", row=2, col=2)
+
+        fig.update_yaxes(title_text="Value", row=1, col=1)
+        fig.update_yaxes(title_text="Value", row=1, col=2)
+        fig.update_yaxes(title_text="Count", row=2, col=1)
+        fig.update_yaxes(title_text="Predicted Value", row=2, col=2)
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Summary statistics
+        st.markdown("### Summary Statistics")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown(f"**{PINN_VARIANTS.get(model_a, model_a.upper())}**")
+            rmse_a = np.sqrt(np.mean(errors_a ** 2))
+            mae_a = np.mean(np.abs(errors_a))
+            corr_a = np.corrcoef(preds_a['predictions'], preds_a['targets'])[0, 1]
+            st.metric("RMSE", f"{rmse_a:.4f}")
+            st.metric("MAE", f"{mae_a:.4f}")
+            st.metric("Correlation", f"{corr_a:.4f}")
+
+        with col2:
+            st.markdown(f"**{PINN_VARIANTS.get(model_b, model_b.upper())}**")
+            rmse_b = np.sqrt(np.mean(errors_b ** 2))
+            mae_b = np.mean(np.abs(errors_b))
+            corr_b = np.corrcoef(preds_b['predictions'], preds_b['targets'])[0, 1]
+            st.metric("RMSE", f"{rmse_b:.4f}")
+            st.metric("MAE", f"{mae_b:.4f}")
+            st.metric("Correlation", f"{corr_b:.4f}")
 
     def render_metrics_comparison(self, all_results: Dict[str, Dict]):
         """Render comprehensive metrics comparison table"""
@@ -142,7 +443,10 @@ class PINNDashboard:
             elif 'test_metrics' in result:
                 metrics = result['test_metrics']
             else:
-                continue
+                metrics = {}
+
+            # Get ML metrics separately (MSE, RMSE, MAE, R², MAPE)
+            ml_metrics = result.get('ml_metrics', {})
 
             # Handle both comprehensive financial metrics and basic test metrics
             # Convert directional_accuracy from 0-100 to 0-1 if needed
@@ -178,10 +482,12 @@ class PINNDashboard:
                 'Volatility_%': metrics.get('volatility', np.nan) * 100 if metrics.get('volatility') is not None else np.nan,
                 'Win_Rate_%': metrics.get('win_rate', np.nan) * 100 if metrics.get('win_rate') is not None else np.nan,
 
-                # Basic ML metrics (always available)
-                'RMSE': metrics.get('test_rmse', metrics.get('rmse', np.nan)),
-                'MAE': metrics.get('test_mae', metrics.get('mae', np.nan)),
-                'R²': metrics.get('test_r2', metrics.get('r2', np.nan))
+                # Basic ML metrics - check ml_metrics first, then financial_metrics/test_metrics
+                'MSE': ml_metrics.get('mse', metrics.get('mse', metrics.get('test_mse', np.nan))),
+                'RMSE': ml_metrics.get('rmse', metrics.get('rmse', metrics.get('test_rmse', np.nan))),
+                'MAE': ml_metrics.get('mae', metrics.get('mae', metrics.get('test_mae', np.nan))),
+                'R²': ml_metrics.get('r2', metrics.get('r2', metrics.get('test_r2', np.nan))),
+                'MAPE': ml_metrics.get('mape', metrics.get('mape', np.nan))
             }
 
             comparison_data.append(row)
@@ -215,20 +521,22 @@ class PINNDashboard:
 
         with tab0:
             st.markdown("### Machine Learning Metrics")
-            ml_cols = ['Model', 'RMSE', 'MAE', 'R²', 'Dir_Accuracy_%']
+            ml_cols = ['Model', 'MSE', 'RMSE', 'MAE', 'R²', 'MAPE', 'Dir_Accuracy_%']
             ml_df = df[ml_cols].copy()
 
             # Styling
             styled_df = ml_df.style.highlight_min(
-                subset=['RMSE', 'MAE'],
+                subset=['MSE', 'RMSE', 'MAE', 'MAPE'],
                 color='lightgreen'
             ).highlight_max(
                 subset=['R²', 'Dir_Accuracy_%'],
                 color='lightgreen'
             ).format({
-                'RMSE': '{:.4f}',
-                'MAE': '{:.4f}',
+                'MSE': '{:.6f}',
+                'RMSE': '{:.6f}',
+                'MAE': '{:.6f}',
                 'R²': '{:.4f}',
+                'MAPE': '{:.2f}%',
                 'Dir_Accuracy_%': '{:.2f}%'
             })
 
@@ -240,15 +548,22 @@ class PINNDashboard:
             with col1:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
+                    name='MSE',
+                    x=ml_df['Model'],
+                    y=ml_df['MSE'],
+                    marker_color='steelblue'
+                ))
+                fig.add_trace(go.Bar(
                     name='RMSE',
                     x=ml_df['Model'],
                     y=ml_df['RMSE'],
                     marker_color='indianred'
                 ))
                 fig.update_layout(
-                    title='RMSE Comparison (Lower is Better)',
+                    title='MSE & RMSE Comparison (Lower is Better)',
                     xaxis_title='Model',
-                    yaxis_title='RMSE',
+                    yaxis_title='Error',
+                    barmode='group',
                     height=400
                 )
                 st.plotly_chart(fig, use_container_width=True)
@@ -256,11 +571,50 @@ class PINNDashboard:
             with col2:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
+                    name='MAE',
+                    x=ml_df['Model'],
+                    y=ml_df['MAE'],
+                    marker_color='coral'
+                ))
+                fig.update_layout(
+                    title='MAE Comparison (Lower is Better)',
+                    xaxis_title='Model',
+                    yaxis_title='MAE',
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Additional row for R² and Directional Accuracy
+            col3, col4 = st.columns(2)
+
+            with col3:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    name='R²',
+                    x=ml_df['Model'],
+                    y=ml_df['R²'],
+                    marker_color='forestgreen'
+                ))
+                fig.add_hline(y=1.0, line_dash="dash", line_color="green",
+                             annotation_text="Perfect R² = 1.0")
+                fig.update_layout(
+                    title='R² Score (Higher is Better)',
+                    xaxis_title='Model',
+                    yaxis_title='R²',
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            with col4:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
                     name='Directional Accuracy',
                     x=ml_df['Model'],
                     y=ml_df['Dir_Accuracy_%'],
                     marker_color='mediumseagreen'
                 ))
+                fig.add_hline(y=50, line_dash="dash", line_color="red",
+                             annotation_text="50% Random Baseline")
                 fig.update_layout(
                     title='Directional Accuracy (Higher is Better)',
                     xaxis_title='Model',
@@ -693,6 +1047,11 @@ class PINNDashboard:
                     if isinstance(value, float):
                         st.metric(key.replace('_', ' ').title(), f"{value:.4f}")
 
+    def render_live_metrics(self):
+        """Render live metrics computation panel"""
+        calculator = StreamlitMetricsCalculator()
+        calculator.render_computation_panel()
+
 
 def main():
     """Main dashboard application"""
@@ -742,6 +1101,8 @@ def main():
         "Dashboard Navigation",
         [
             "Metrics Comparison",
+            "Live Metrics Computation",
+            "Prediction Comparison",
             "Rolling Performance",
             "Training History",
             "Model Details"
@@ -751,6 +1112,12 @@ def main():
     # Render selected page
     if page == "Metrics Comparison":
         dashboard.render_metrics_comparison(all_results)
+
+    elif page == "Live Metrics Computation":
+        dashboard.render_live_metrics()
+
+    elif page == "Prediction Comparison":
+        dashboard.render_prediction_comparison(all_results)
 
     elif page == "Rolling Performance":
         dashboard.render_rolling_performance(all_results)

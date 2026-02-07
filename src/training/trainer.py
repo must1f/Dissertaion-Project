@@ -183,6 +183,10 @@ class Trainer:
                     if 'volatilities' in metadata:
                         metadata['volatilities'] = metadata['volatilities'].to(self.device)
 
+                    # CRITICAL: Add inputs to metadata for Black-Scholes autograd
+                    # This enables computing exact derivatives via torch.autograd.grad
+                    metadata['inputs'] = sequences
+
                     # Compute loss with physics
                     loss, loss_dict = self.model.compute_loss(
                         predictions, targets, metadata, enable_physics=enable_physics
@@ -273,6 +277,9 @@ class Trainer:
                         metadata['returns'] = metadata['returns'].to(self.device)
                     if 'volatilities' in metadata:
                         metadata['volatilities'] = metadata['volatilities'].to(self.device)
+
+                    # Add inputs for Black-Scholes autograd
+                    metadata['inputs'] = sequences
 
                     loss, _ = self.model.compute_loss(
                         predictions, targets, metadata, enable_physics=enable_physics

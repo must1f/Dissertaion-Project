@@ -311,8 +311,8 @@ def main():
                         logger.info(f"⊙ Skipping {model_name}: comprehensive results already exist")
                         skipped += 1
                         continue
-            except:
-                pass
+            except (json.JSONDecodeError, IOError, KeyError) as e:
+                logger.debug(f"Could not check existing results for {model_key}: {e}")
 
         # Evaluate model
         try:

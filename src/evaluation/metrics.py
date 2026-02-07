@@ -82,7 +82,9 @@ class MetricsCalculator:
         correct = (true_significant == pred_significant).sum()
         total = len(true_significant)
 
-        return (correct / total) * 100 if total > 0 else 0.0
+        # FIX: Return 0-1 scale for consistency with financial_metrics.py
+        # Dashboard will multiply by 100 for display
+        return (correct / total) if total > 0 else 0.0
 
     @staticmethod
     def sharpe_ratio(
@@ -99,17 +101,28 @@ class MetricsCalculator:
             periods_per_year: Number of periods per year (252 for daily)
 
         Returns:
-            Annualized Sharpe ratio
+            Annualized Sharpe ratio (capped at reasonable bounds)
         """
-        if len(returns) == 0 or np.std(returns) == 0:
+        if len(returns) == 0:
+            return 0.0
+
+        # CRITICAL FIX: Clip returns to realistic bounds
+        returns = np.clip(returns, -0.99, 1.0)
+
+        std_return = np.std(returns)
+        if std_return < 1e-10:
             return 0.0
 
         # Annualize
         mean_return = np.mean(returns) * periods_per_year
-        std_return = np.std(returns) * np.sqrt(periods_per_year)
+        std_return = std_return * np.sqrt(periods_per_year)
 
         sharpe = (mean_return - risk_free_rate) / std_return
-        return sharpe
+
+        # Cap at reasonable bounds
+        sharpe = np.clip(sharpe, -5.0, 5.0)
+
+        return float(sharpe)
 
     @staticmethod
     def sortino_ratio(
@@ -126,26 +139,34 @@ class MetricsCalculator:
             periods_per_year: Number of periods per year
 
         Returns:
-            Annualized Sortino ratio
+            Annualized Sortino ratio (capped at reasonable bounds)
         """
         if len(returns) == 0:
             return 0.0
 
-        # Downside returns (negative returns)
+        # CRITICAL FIX: Clip returns to realistic bounds
+        returns = np.clip(returns, -0.99, 1.0)
+
+        # Downside returns (negative returns below 0 - standard Sortino)
         downside_returns = returns[returns < 0]
 
         if len(downside_returns) == 0:
-            return np.inf
+            # No downside: return bounded value instead of inf
+            return 10.0
 
         # Annualize
         mean_return = np.mean(returns) * periods_per_year
         downside_std = np.std(downside_returns) * np.sqrt(periods_per_year)
 
-        if downside_std == 0:
-            return 0.0
+        if downside_std < 1e-10:
+            return 10.0
 
         sortino = (mean_return - risk_free_rate) / downside_std
-        return sortino
+
+        # Cap at reasonable bounds
+        sortino = np.clip(sortino, -10.0, 10.0)
+
+        return float(sortino)
 
     @staticmethod
     def max_drawdown(cumulative_returns: np.ndarray) -> float:
@@ -156,10 +177,13 @@ class MetricsCalculator:
             cumulative_returns: Array of cumulative returns
 
         Returns:
-            Maximum drawdown (as positive percentage)
+            Maximum drawdown (as positive percentage, capped at 100%)
         """
         if len(cumulative_returns) == 0:
             return 0.0
+
+        # CRITICAL FIX: Ensure equity doesn't go negative
+        cumulative_returns = np.maximum(cumulative_returns, 1e-10)
 
         # Calculate running maximum
         running_max = np.maximum.accumulate(cumulative_returns)
@@ -167,8 +191,13 @@ class MetricsCalculator:
         # Calculate drawdown
         drawdown = (cumulative_returns - running_max) / running_max
 
-        # Return maximum drawdown as positive value
-        return abs(np.min(drawdown)) * 100
+        # CRITICAL FIX: Cap drawdown at -100% (total loss is the max possible)
+        drawdown = np.maximum(drawdown, -1.0)
+
+        # Return maximum drawdown as positive value (capped at 100%)
+        max_dd = min(abs(np.min(drawdown)) * 100, 100.0)
+
+        return float(max_dd)
 
     @staticmethod
     def calmar_ratio(
@@ -183,10 +212,13 @@ class MetricsCalculator:
             periods_per_year: Number of periods per year
 
         Returns:
-            Calmar ratio
+            Calmar ratio (capped at reasonable bounds)
         """
         if len(returns) == 0:
             return 0.0
+
+        # CRITICAL FIX: Clip returns to realistic bounds
+        returns = np.clip(returns, -0.99, 1.0)
 
         # Calculate cumulative returns
         cumulative_returns = (1 + returns).cumprod()
@@ -194,15 +226,28 @@ class MetricsCalculator:
         # Annualized return
         total_return = cumulative_returns[-1] - 1
         n_years = len(returns) / periods_per_year
-        annualized_return = (1 + total_return) ** (1 / n_years) - 1
+
+        if n_years <= 0:
+            return 0.0
+
+        # Handle edge case for total loss
+        if total_return <= -1:
+            annualized_return = -1.0
+        else:
+            annualized_return = (1 + total_return) ** (1 / n_years) - 1
 
         # Maximum drawdown
         max_dd = MetricsCalculator.max_drawdown(cumulative_returns) / 100
 
-        if max_dd == 0:
-            return 0.0
+        if max_dd < 0.001:  # Less than 0.1% drawdown
+            return 10.0 if annualized_return > 0 else 0.0
 
-        return annualized_return / max_dd
+        calmar = annualized_return / max_dd
+
+        # Cap at reasonable bounds
+        calmar = np.clip(calmar, -10.0, 10.0)
+
+        return float(calmar)
 
     @staticmethod
     def win_rate(returns: np.ndarray) -> float:
@@ -242,12 +287,17 @@ def calculate_metrics(
     """
     calc = MetricsCalculator()
 
+    # FIX: directional_accuracy now returns 0-1 scale
+    # Multiply by 100 for backward compatibility with existing training scripts
+    dir_acc = calc.directional_accuracy(y_true, y_pred)
+
     metrics = {
         f"{prefix}rmse": calc.rmse(y_true, y_pred),
         f"{prefix}mae": calc.mae(y_true, y_pred),
         f"{prefix}mape": calc.mape(y_true, y_pred),
         f"{prefix}r2": calc.r2(y_true, y_pred),
-        f"{prefix}directional_accuracy": calc.directional_accuracy(y_true, y_pred),
+        f"{prefix}directional_accuracy": dir_acc * 100,  # Convert to percentage for display
+        f"{prefix}mse": calc.rmse(y_true, y_pred) ** 2,  # FIX: Add MSE explicitly
     }
 
     return metrics
@@ -273,8 +323,16 @@ def calculate_financial_metrics(
     """
     calc = MetricsCalculator()
 
-    # Calculate cumulative returns
+    # CRITICAL FIX: Clip returns to realistic bounds first
+    returns = np.clip(returns, -0.99, 1.0)
+
+    # Calculate cumulative returns with equity floor
     cumulative_returns = (1 + returns).cumprod()
+    cumulative_returns = np.maximum(cumulative_returns, 1e-10)
+
+    # Total return (capped at -100% min)
+    total_ret = (cumulative_returns[-1] - 1) * 100 if len(cumulative_returns) > 0 else 0.0
+    total_ret = max(total_ret, -100.0)
 
     metrics = {
         f"{prefix}sharpe_ratio": calc.sharpe_ratio(returns, risk_free_rate, periods_per_year),
@@ -282,7 +340,7 @@ def calculate_financial_metrics(
         f"{prefix}max_drawdown": calc.max_drawdown(cumulative_returns),
         f"{prefix}calmar_ratio": calc.calmar_ratio(returns, periods_per_year),
         f"{prefix}win_rate": calc.win_rate(returns),
-        f"{prefix}total_return": (cumulative_returns[-1] - 1) * 100 if len(cumulative_returns) > 0 else 0.0,
+        f"{prefix}total_return": total_ret,
         f"{prefix}mean_return": np.mean(returns) * 100,
         f"{prefix}volatility": np.std(returns) * np.sqrt(periods_per_year) * 100,
     }

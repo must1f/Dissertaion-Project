@@ -32,6 +32,7 @@ from src.utils.logger import get_logger, ensure_logger_initialized
 from src.models.pinn import PINNModel
 from src.models.baseline import LSTMModel, GRUModel, BiLSTMModel, AttentionLSTM
 from src.models.transformer import TransformerModel
+from src.models.stacked_pinn import StackedPINN, ResidualPINN
 from src.evaluation.unified_evaluator import UnifiedModelEvaluator
 
 ensure_logger_initialized()
@@ -117,6 +118,19 @@ class ModelEvaluator:
                 'class': PINNModel,
                 'checkpoint': 'pinn_global_best.pt'
             },
+            # Advanced PINN architectures
+            'pinn_stacked': {
+                'name': 'StackedPINN',
+                'type': 'advanced',
+                'class': StackedPINN,
+                'checkpoint': 'stacked_pinn/stacked_pinn_best.pt'
+            },
+            'pinn_residual': {
+                'name': 'ResidualPINN',
+                'type': 'advanced',
+                'class': ResidualPINN,
+                'checkpoint': 'stacked_pinn/residual_pinn_best.pt'
+            },
         }
 
         self.evaluator = UnifiedModelEvaluator(
@@ -187,6 +201,32 @@ class ModelEvaluator:
                     output_dim=1,
                     dropout=dropout
                 )
+            elif model_class == StackedPINN:
+                # StackedPINN architecture
+                model = model_class(
+                    input_dim=input_dim,
+                    encoder_dim=hidden_size,
+                    lstm_hidden_dim=hidden_size,
+                    num_encoder_layers=2,
+                    num_rnn_layers=num_layers,
+                    prediction_hidden_dim=64,
+                    dropout=dropout,
+                    lambda_gbm=0.1,
+                    lambda_ou=0.1
+                )
+            elif model_class == ResidualPINN:
+                # ResidualPINN architecture
+                model = model_class(
+                    input_dim=input_dim,
+                    base_model_type='lstm',
+                    base_hidden_dim=hidden_size,
+                    correction_hidden_dim=64,
+                    num_base_layers=num_layers,
+                    num_correction_layers=2,
+                    dropout=dropout,
+                    lambda_gbm=0.1,
+                    lambda_ou=0.1
+                )
             else:
                 # Baseline models (LSTM, GRU, BiLSTM, AttentionLSTM)
                 # These use input_dim, hidden_dim, output_dim
@@ -234,9 +274,12 @@ class ModelEvaluator:
                 # Get predictions
                 output = model(X_batch)
 
-                # Handle models that return tuples (LSTM, GRU return (output, hidden))
+                # Handle models that return tuples
+                # LSTM, GRU return (output, hidden)
+                # StackedPINN returns (return_pred, direction_logits, attention_weights)
+                # ResidualPINN returns (final_pred, direction_logits, correction)
                 if isinstance(output, tuple):
-                    predictions = output[0]  # First element is the actual output
+                    predictions = output[0]  # First element is the actual prediction
                 else:
                     predictions = output
 
@@ -279,6 +322,11 @@ class ModelEvaluator:
         # Save results
         output_path = self.results_dir / f'{model_key}_results.json'
         self.save_results(results, output_path)
+
+        # Save predictions for visualization
+        predictions_path = self.results_dir / f'{model_key}_predictions.npz'
+        np.savez(predictions_path, predictions=predictions, targets=targets)
+        logger.info(f"✓ Predictions saved to {predictions_path}")
 
         logger.info(f"✓ Results saved to {output_path}")
         logger.info("")
