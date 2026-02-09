@@ -180,11 +180,14 @@ class TestModelSizes:
         )
         n_params = sum(p.numel() for p in model.parameters())
 
-        # PINN should have same params as base model (physics is in loss, not architecture)
+        # PINN has same params as base model PLUS 3 learnable physics parameters:
+        # theta_raw (OU mean reversion), gamma_raw (Langevin friction), temperature_raw (Langevin temperature)
         base_model = LSTMModel(input_dim=10, hidden_dim=64, num_layers=2)
         base_params = sum(p.numel() for p in base_model.parameters())
-
-        assert n_params == base_params
+        
+        # PINN should have base params + 3 physics params
+        expected_params = base_params + 3
+        assert n_params == expected_params, f"Expected {expected_params} params (base: {base_params} + 3 physics), got {n_params}"
 
 
 if __name__ == '__main__':
