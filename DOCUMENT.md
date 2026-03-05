@@ -28,6 +28,7 @@
 35. [Model Architecture Diagrams](#35-model-architecture-diagrams-2026-03-03)
 40. [Baseline PINN Registry Fix & Returns-First Training Alignment](#40-baseline-pinn-registry-fix--returns-first-training-alignment-2026-03-05)
 41. [Google Colab Training Notebook](#41-google-colab-training-notebook-2026-03-05)
+42. [Colab Notebook Metrics & Data Prep Updates](#42-colab-notebook-metrics--data-prep-updates-2026-03-05)
 
 ---
 
@@ -6247,3 +6248,26 @@ Added a Colab-ready notebook that runs real (HAS_SRC=True) training for all base
 |------|---------|
 | `Jupyter/Colab_All_Models.ipynb` | Added end-to-end Colab workflow for training all models |
 | `DOCUMENT.md` | Documented the Colab training notebook and verification steps |
+
+## 42. Colab Notebook Metrics & Data Prep Updates (2026-03-05)
+
+### Overview
+Refined the Colab training notebook to align with the research-grade Python pipeline: updated feature set, improved evaluation metrics, and cleaned outputs for reproducibility across baseline, PINN, and volatility models.
+
+### Changes Made
+1. **File**: `Jupyter/Colab_All_Models.ipynb`
+   - Reduced model count display to reflect 20 tracked architectures and clarified registry count messaging.
+   - Synced data preparation with the research pipeline (feature list, physics metadata validation, close-price target, optional refresh) and normalized seed handling.
+   - Expanded evaluation to compute ML and financial metrics using shared constants (transaction cost, risk-free rate, trading days) and serialization helpers.
+   - Enhanced training loops with physics toggling, history tracking (data/physics loss, LR), and richer summaries for price and volatility models.
+   - Added comparison plots for volatility metrics and all price-model prediction overlays; cleaned execution counts/outputs for a fresh Colab run.
+
+### Verification
+- Run the notebook in Colab GPU runtime end-to-end: data prep, baseline/PINN training with `enable_physics` auto-set for PINNs, volatility block, and plotting cells.
+- Confirm `results/colab_runs/` contains per-model JSON summaries and generated comparison PNGs without import errors (HAS_SRC=True logs).
+
+### Files Modified
+| File | Changes |
+|------|---------|
+| `Jupyter/Colab_All_Models.ipynb` | Updated data prep, metrics, training summaries, and plotting for research-aligned Colab runs |
+| `DOCUMENT.md` | Added entry documenting the Colab notebook metric/data prep updates |
