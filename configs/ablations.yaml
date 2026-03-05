@@ -1,0 +1,34 @@
+ablations:
+  curriculum:
+    baseline:
+      curriculum:
+        enabled: false
+    treatment:
+      curriculum:
+        enabled: true
+        warmup_epochs: 10
+        ramp_epochs: 20
+        final_physics_weight: 1.0
+        schedule: linear
+
+  adaptive_weights:
+    baseline:
+      training:
+        adaptive_weighting: none
+    treatment:
+      training:
+        adaptive_weighting: gradnorm
+        gradnorm_alpha: 1.5
+
+  physics_terms:
+    baseline:
+      model:
+        pde_terms: ["data"]
+    treatment:
+      model:
+        pde_terms: ["data", "gbm", "ou", "bs"]
+
+defaults:
+  seeds: [42, 43, 44]
+  output_dir: "outputs/ablations"
+

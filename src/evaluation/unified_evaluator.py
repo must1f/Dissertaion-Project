@@ -8,12 +8,13 @@ Ensures consistent evaluation across LSTM, GRU, Transformer, and all PINN varian
 import numpy as np
 import pandas as pd
 import torch
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 import json
 
 from .financial_metrics import FinancialMetrics, compute_strategy_returns
 from .rolling_metrics import RollingPerformanceAnalyzer
+from .walk_forward_validation import WalkForwardValidator
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -50,8 +51,18 @@ class UnifiedModelEvaluator:
         targets: np.ndarray,
         model_name: str = "Model",
         compute_rolling: bool = True,
-        rolling_window_size: int = 63
-    ) -> Dict[str, any]:
+        rolling_window_size: int = 63,
+        are_returns: bool = True,
+        strategy_threshold: float = 0.0,
+        strategy_mode: str = "sign",
+        max_leverage: float = 1.0,
+        volatility: np.ndarray | None = None,
+        use_walk_forward: bool = False,
+        walk_forward_method: str = "anchored",
+        walk_forward_folds: int = 5,
+        embargo_size: int = 5,
+        timestamps: Optional[pd.DatetimeIndex] = None,
+    ) -> Dict[str, Any]:
         """
         Comprehensive evaluation of a model
 
@@ -95,12 +106,25 @@ class UnifiedModelEvaluator:
 
         # ========== STRATEGY RETURNS ==========
         logger.info("Computing strategy returns with transaction costs...")
-        logger.info(f"  Targets: Normalized prices (not returns)")
-        logger.info(f"  Converting to returns for strategy computation...")
+        logger.info(f"  Targets interpreted as {'returns' if are_returns else 'prices'}")
         logger.info(f"  Transaction cost: {self.transaction_cost*100:.2f}%")
-        strategy_returns = compute_strategy_returns(
-            predictions, targets, self.transaction_cost, are_returns=False
+        strategy_result = compute_strategy_returns(
+            predictions,
+            targets,
+            transaction_cost=self.transaction_cost,
+            are_returns=are_returns,
+            threshold=strategy_threshold,
+            sizing_mode=strategy_mode,
+            max_leverage=max_leverage,
+            volatility=volatility,
+            return_details=True,
         )
+
+        if isinstance(strategy_result, tuple):
+            strategy_returns, strategy_details = strategy_result
+        else:
+            strategy_returns = strategy_result
+            strategy_details = None
 
         # ========== COMPREHENSIVE FINANCIAL METRICS ==========
         logger.info("Computing comprehensive financial metrics...")
@@ -111,6 +135,12 @@ class UnifiedModelEvaluator:
             risk_free_rate=self.risk_free_rate,
             periods_per_year=self.periods_per_year
         )
+
+        if strategy_details:
+            turnover = float(np.mean(strategy_details["position_changes"]))
+            trading_pct = float(np.mean(strategy_details["position_changes"] > 0))
+            financial_metrics["average_turnover"] = turnover
+            financial_metrics["trading_days_pct"] = trading_pct
 
         results['financial_metrics'] = financial_metrics
 
@@ -133,9 +163,21 @@ class UnifiedModelEvaluator:
                     periods_per_year=self.periods_per_year
                 )
 
+                # Serialize rolling windows for downstream analysis
+                serialized_windows = []
+                for r in rolling_results:
+                    serialized_windows.append({
+                        'window_id': r.window_id,
+                        'start_idx': r.start_idx,
+                        'end_idx': r.end_idx,
+                        'n_samples': r.n_samples,
+                        **{k: v for k, v in r.metrics.items()}
+                    })
+
                 results['rolling_metrics'] = {
                     'n_windows': len(rolling_results),
-                    'stability': stability_metrics
+                    'stability': stability_metrics,
+                    'windows': serialized_windows
                 }
 
                 logger.info(f"  Rolling windows: {len(rolling_results)}")
@@ -145,10 +187,113 @@ class UnifiedModelEvaluator:
                 logger.warning(f"Rolling analysis failed: {e}")
                 results['rolling_metrics'] = None
 
+        # ========== WALK-FORWARD VALIDATION ==========
+        if use_walk_forward:
+            try:
+                wf_results = self._evaluate_walk_forward(
+                    predictions=predictions,
+                    targets=targets,
+                    are_returns=are_returns,
+                    strategy_threshold=strategy_threshold,
+                    strategy_mode=strategy_mode,
+                    max_leverage=max_leverage,
+                    volatility=volatility,
+                    method=walk_forward_method,
+                    n_folds=walk_forward_folds,
+                    embargo_size=embargo_size,
+                    timestamps=timestamps
+                )
+                results['walk_forward'] = wf_results
+            except Exception as e:
+                logger.warning(f"Walk-forward validation failed: {e}")
+                results['walk_forward'] = None
+
         # ========== SUMMARY LOGGING ==========
         self._log_summary(results)
 
         return results
+
+    def _evaluate_walk_forward(
+        self,
+        predictions: np.ndarray,
+        targets: np.ndarray,
+        are_returns: bool,
+        strategy_threshold: float,
+        strategy_mode: str,
+        max_leverage: float,
+        volatility: np.ndarray | None,
+        method: str,
+        n_folds: int,
+        embargo_size: int,
+        timestamps: Optional[pd.DatetimeIndex]
+    ) -> Dict[str, Any]:
+        """
+        Perform walk-forward evaluation on predictions/targets using chronological folds.
+        """
+        validator = WalkForwardValidator(method=method, n_folds=n_folds, embargo_size=embargo_size)
+        folds = validator.generate_folds(len(predictions), timestamps=timestamps)
+
+        fold_metrics: List[Dict[str, float]] = []
+
+        for fold in folds:
+            test_slice = slice(fold.test_start, fold.test_end)
+            preds_fold = predictions[test_slice]
+            targets_fold = targets[test_slice]
+            if len(preds_fold) == 0:
+                continue
+
+            strat_res = compute_strategy_returns(
+                preds_fold,
+                targets_fold,
+                transaction_cost=self.transaction_cost,
+                are_returns=are_returns,
+                threshold=strategy_threshold,
+                sizing_mode=strategy_mode,
+                max_leverage=max_leverage,
+                volatility=None if volatility is None else volatility[test_slice],
+                return_details=True,
+            )
+
+            strategy_returns, details = strat_res if isinstance(strat_res, tuple) else (strat_res, None)
+            fm = FinancialMetrics.compute_all_metrics(
+                returns=strategy_returns,
+                predictions=preds_fold,
+                targets=targets_fold,
+                risk_free_rate=self.risk_free_rate,
+                periods_per_year=self.periods_per_year
+            )
+
+            if details:
+                fm['average_turnover'] = float(np.mean(details['position_changes']))
+                fm['trading_days_pct'] = float(np.mean(details['position_changes'] > 0))
+
+            fm['fold_id'] = fold.fold_id
+            fm['test_size'] = fold.test_size
+            fold_metrics.append(fm)
+
+        if not fold_metrics:
+            return {}
+
+        def _collect(metric: str) -> List[float]:
+            return [m.get(metric, 0.0) for m in fold_metrics]
+
+        summary = {
+            'n_folds': len(fold_metrics),
+            'sharpe_mean': float(np.mean(_collect('sharpe_ratio'))),
+            'sharpe_std': float(np.std(_collect('sharpe_ratio'))),
+            'sortino_mean': float(np.mean(_collect('sortino_ratio'))),
+            'sortino_std': float(np.std(_collect('sortino_ratio'))),
+            'calmar_mean': float(np.mean(_collect('calmar_ratio'))),
+            'calmar_std': float(np.std(_collect('calmar_ratio'))),
+            'diracc_mean': float(np.mean(_collect('directional_accuracy'))),
+            'diracc_std': float(np.std(_collect('directional_accuracy'))),
+            'max_drawdown_worst': float(min(_collect('max_drawdown'))),
+        }
+
+        return {
+            'folds': fold_metrics,
+            'summary': summary
+        }
 
     def _compute_ml_metrics(self, predictions: np.ndarray, targets: np.ndarray) -> Dict[str, float]:
         """Compute traditional ML metrics"""

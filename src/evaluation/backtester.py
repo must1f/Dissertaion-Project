@@ -12,7 +12,7 @@ Integration with uncertainty estimation from trading agent.
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -44,6 +44,11 @@ class Trade:
     value: float
     commission: float = 0.0
     reason: str = ""
+    pnl: Optional[float] = None
+    pnl_percent: Optional[float] = None
+    position_before: float = 0.0
+    position_after: float = 0.0
+    slippage: float = 0.0
 
 
 @dataclass
@@ -73,8 +78,10 @@ class BacktestResults:
     portfolio_values: List[float] = field(default_factory=list)
     timestamps: List[pd.Timestamp] = field(default_factory=list)
     returns: np.ndarray = field(default_factory=lambda: np.array([]))
-    metrics: Dict[str, float] = field(default_factory=dict)
+    metrics: Dict[str, Union[float, str]] = field(default_factory=dict)
     positions_history: List[Dict[str, Position]] = field(default_factory=list)
+    weights_history: List[Dict[str, float]] = field(default_factory=list)
+    turnover: np.ndarray = field(default_factory=lambda: np.array([]))
 
     def to_dataframe(self) -> pd.DataFrame:
         """Convert results to DataFrame"""
@@ -121,6 +128,8 @@ class Backtester:
         take_profit: float = 0.05,       # 5%
         position_sizing_method: Union[str, PositionSizingMethod] = PositionSizingMethod.FIXED,
         risk_per_trade: float = 0.02,    # For fixed sizing
+        turnover_cost: float = 0.001,    # Cost per unit turnover (e.g., 10 bps)
+        enforce_signal_lag: bool = True,
     ):
         """
         Initialize backtester
@@ -142,6 +151,8 @@ class Backtester:
         self.stop_loss = stop_loss
         self.take_profit = take_profit
         self.risk_per_trade = risk_per_trade
+        self.turnover_cost = turnover_cost
+        self.enforce_signal_lag = enforce_signal_lag
 
         # Position sizing
         if isinstance(position_sizing_method, str):
@@ -219,6 +230,8 @@ class Backtester:
         self.positions = {}
         self.trades = []
         self.portfolio_history = []
+        self.positions_history = []
+        self.weights_history = []
         self.trade_stats = {
             'wins': 0,
             'losses': 0,
@@ -420,6 +433,10 @@ class Backtester:
                 logger.debug(f"Insufficient cash for {ticker}: need ${total_cost:.2f}, have ${self.cash:.2f}")
                 return None
 
+            position_before = self.positions[ticker].quantity if ticker in self.positions else 0.0
+            position_after = position_before + quantity
+            slippage_amount = price * self.slippage_rate * quantity
+
             # Execute buy
             self.cash -= total_cost
 
@@ -456,7 +473,10 @@ class Backtester:
                 quantity=quantity,
                 value=value,
                 commission=commission,
-                reason=reason
+                reason=reason,
+                position_before=position_before,
+                position_after=position_after,
+                slippage=slippage_amount
             )
             self.trades.append(trade)
 
@@ -488,6 +508,10 @@ class Backtester:
             # Update trade statistics for Kelly Criterion
             self.update_trade_stats(pnl_pct)
 
+            position_before = pos.quantity
+            position_after = pos.quantity - quantity
+            slippage_amount = price * self.slippage_rate * quantity
+
             # Execute sell
             self.cash += proceeds
 
@@ -507,7 +531,12 @@ class Backtester:
                 quantity=quantity,
                 value=value,
                 commission=commission,
-                reason=reason
+                reason=reason,
+                pnl=pnl,
+                pnl_percent=pnl_pct * 100,
+                position_before=position_before,
+                position_after=position_after,
+                slippage=slippage_amount
             )
             self.trades.append(trade)
 
@@ -605,6 +634,8 @@ class Backtester:
         # Get unique timestamps
         unique_timestamps = data['timestamp'].unique()
 
+        pending_rows = None  # signals to execute on current timestamp (lagged)
+
         for timestamp in unique_timestamps:
             # Get data for this timestamp
             timestamp_data = data[data['timestamp'] == timestamp]
@@ -612,38 +643,76 @@ class Backtester:
             # Build current prices dictionary
             current_prices = dict(zip(timestamp_data['ticker'], timestamp_data['price']))
 
-            # Check stop-loss and take-profit
+            # Check stop-loss and take-profit before new signals
             self.check_stop_loss_take_profit(timestamp, current_prices)
 
-            # Execute new signals
-            for _, row in timestamp_data.iterrows():
-                ticker = row['ticker']
-                signal = row['signal']
-                price = row['price']
-                confidence = row.get('confidence', 1.0)
+            # Execute lagged signals (previous timestamp predictions)
+            rows_to_execute = pending_rows if self.enforce_signal_lag else timestamp_data
+            if rows_to_execute is not None:
+                for _, row in rows_to_execute.iterrows():
+                    ticker = cast(str, row['ticker'])
+                    signal = cast(str, row['signal'])
+                    price = float(cast(Any, row['price']))
+                    conf_val = row.get('confidence', 1.0)
+                    if isinstance(conf_val, (pd.Series, pd.DataFrame)):
+                        conf_val = conf_val.iloc[0] if hasattr(conf_val, "iloc") else 1.0
+                    if bool(pd.isna(conf_val)):
+                        conf_val = 1.0
+                    confidence = float(cast(Any, conf_val))
 
-                self.execute_trade(
-                    timestamp=timestamp,
-                    ticker=ticker,
-                    action=signal,
-                    price=price,
-                    confidence=confidence
-                )
+                    self.execute_trade(
+                        timestamp=timestamp,
+                        ticker=ticker,
+                        action=signal,
+                        price=price,
+                        confidence=confidence
+                    )
+
+            # Queue current signals for next timestamp if lag enforced
+            pending_rows = timestamp_data if self.enforce_signal_lag else None
 
             # Record portfolio value
             portfolio_value = self.get_portfolio_value(current_prices)
             portfolio_values.append(portfolio_value)
             timestamps.append(timestamp)
 
+            # Track weights for turnover/exposure
+            if portfolio_value > 0:
+                weights = {
+                    t: pos.market_value / portfolio_value for t, pos in self.positions.items()
+                }
+            else:
+                weights = {}
+
+            self.positions_history.append(self.positions.copy())
+            self.weights_history.append(weights)
+
         # Calculate returns
         portfolio_values = np.array(portfolio_values)
         returns = np.diff(portfolio_values) / portfolio_values[:-1]
 
+        # Compute turnover from weights and apply turnover-based cost
+        if self.weights_history:
+            weights_df = pd.DataFrame(self.weights_history).fillna(0.0)
+            turnover = weights_df.diff().abs().sum(axis=1)
+            turnover.iloc[0] = 0.0
+            turnover_array = turnover.to_numpy()
+        else:
+            turnover_array = np.zeros_like(portfolio_values)
+
+        if len(turnover_array) > 1 and self.turnover_cost > 0:
+            returns -= self.turnover_cost * turnover_array[1:]
+
         # Calculate metrics
-        metrics = calculate_financial_metrics(returns)
+        metrics: Dict[str, Union[float, str]] = dict(
+            cast(Dict[str, float], calculate_financial_metrics(returns))
+        )
         metrics['num_trades'] = len(self.trades)
         metrics['final_value'] = portfolio_values[-1]
         metrics['total_return_pct'] = ((portfolio_values[-1] / self.initial_capital) - 1) * 100
+        metrics['average_turnover'] = float(turnover_array.mean()) if len(turnover_array) else 0.0
+        metrics['trading_days_pct'] = float(np.mean(turnover_array > 0)) if len(turnover_array) else 0.0
+        metrics['turnover_cost'] = self.turnover_cost
 
         # Add position sizing info
         metrics['position_sizing_method'] = self.position_sizing_method.value
@@ -663,7 +732,10 @@ class Backtester:
             portfolio_values=portfolio_values.tolist(),
             timestamps=timestamps,
             returns=returns,
-            metrics=metrics
+            metrics=metrics,
+            positions_history=self.positions_history,
+            weights_history=self.weights_history,
+            turnover=turnover_array
         )
 
         logger.info(f"Backtest completed ({self.position_sizing_method.value}): {len(self.trades)} trades, "

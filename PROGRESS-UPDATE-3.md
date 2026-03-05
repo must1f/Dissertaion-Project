@@ -1,4 +1,4 @@
-# Section 3: Current Stage and Methodology
+`# Section 3: Current Stage and Methodology
 
 ## Physics-Informed Neural Networks for Financial Forecasting
 
@@ -1453,3 +1453,4 @@ def set_seed(seed: int = 42):
 *Codebase: 42 Python modules, ~1.8MB source code*
 
 *Infrastructure: Docker (3 services), GitHub Actions CI/CD, TimescaleDB + Parquet storage*
+`

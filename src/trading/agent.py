@@ -80,13 +80,19 @@ class UncertaintyEstimator:
                 module.eval()
 
     def _forward_pass(self, model: nn.Module, sequences: torch.Tensor) -> torch.Tensor:
-        """Single forward pass handling different model types"""
+        """Single forward pass handling different model types."""
         model_class_name = model.__class__.__name__.lower()
 
-        if hasattr(model, 'base_model_type') and model.base_model_type in ['lstm', 'gru']:
-            predictions, _ = model(sequences)
+        # PINNModel wraps LSTM/GRU internally and returns a single tensor
+        if 'pinn' in model_class_name:
+            predictions = model(sequences)
+        elif hasattr(model, 'base_model_type') and model.base_model_type in ['lstm', 'gru']:
+            # Raw LSTM/GRU models return (predictions, hidden_state)
+            result = model(sequences)
+            predictions = result[0] if isinstance(result, tuple) else result
         elif 'lstm' in model_class_name or 'gru' in model_class_name:
-            predictions, _ = model(sequences)
+            result = model(sequences)
+            predictions = result[0] if isinstance(result, tuple) else result
         else:
             predictions = model(sequences)
 
@@ -403,7 +409,10 @@ class SignalGenerator:
         confidence_threshold: float = 0.6,
         estimate_uncertainty: bool = True,
         uncertainty_method: str = 'mc_dropout',
-        risk_adjusted: bool = True
+        risk_adjusted: bool = True,
+        price_mean: float = 0.0,
+        price_std: float = 1.0,
+        prediction_target: str = 'log_return'
     ) -> Tuple[List[Signal], Optional[Dict]]:
         """
         Generate trading signals from predictions with uncertainty-aware decision making
@@ -436,10 +445,30 @@ class SignalGenerator:
             confidence_scores = uncertainty_details.get('confidence_scores', None)
             pred_intervals_lower = uncertainty_details.get('prediction_interval_lower', None)
             pred_intervals_upper = uncertainty_details.get('prediction_interval_upper', None)
+            
+            # Un-normalize based on prediction target
+            if prediction_target == 'log_return':
+                if pred_intervals_lower is not None:
+                    real_lower_ret = pred_intervals_lower * price_std + price_mean
+                    pred_intervals_lower = current_prices * np.exp(real_lower_ret)
+                if pred_intervals_upper is not None:
+                    real_upper_ret = pred_intervals_upper * price_std + price_mean
+                    pred_intervals_upper = current_prices * np.exp(real_upper_ret)
+            else:
+                if pred_intervals_lower is not None:
+                    pred_intervals_lower = pred_intervals_lower * price_std + price_mean
+                if pred_intervals_upper is not None:
+                    pred_intervals_upper = pred_intervals_upper * price_std + price_mean
         else:
             confidence_scores = None
             pred_intervals_lower = None
             pred_intervals_upper = None
+
+        if prediction_target == 'log_return':
+            real_log_returns = predicted_prices * price_std + price_mean
+            predicted_prices = current_prices * np.exp(real_log_returns)
+        else:
+            predicted_prices = predicted_prices * price_std + price_mean
 
         for i, (pred_price, curr_price, ticker, timestamp) in enumerate(
             zip(predicted_prices, current_prices, tickers, timestamps)

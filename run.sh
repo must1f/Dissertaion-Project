@@ -43,6 +43,82 @@ section_header() {
     echo ""
 }
 
+# Normalize/sync trained model artifacts so the web API can discover them
+sync_models_for_webapp() {
+    section_header "Syncing Trained Models for Web App"
+
+    # Normalize directory name (some runs created capitalized 'Models')
+    if [ -d "Models" ] && [ ! -d "models" ]; then
+        debug_msg "Renaming Models -> models for backend compatibility"
+        mv Models models
+    elif [ -d "Models" ] && [ -d "models" ]; then
+        debug_msg "Merging Models into models/"
+        rsync -a Models/ models/ 2>/dev/null || cp -R Models/. models/
+    fi
+
+    mkdir -p models models/stacked_pinn
+
+    # Copy checkpoints/histories from checkpoints/ (used by some scripts)
+    if [ -d "checkpoints" ]; then
+        find checkpoints -maxdepth 2 -type f \( -name "*_best.pt" -o -name "*_best.pth" -o -name "*_history.json" \) -print0 \
+        | while IFS= read -r -d '' file; do
+            dest="models/$(basename "$file")"
+            if [ ! -f "$dest" ]; then
+                debug_msg "Syncing $(basename "$file") from checkpoints to models/"
+                cp "$file" "$dest"
+            fi
+        done
+    fi
+
+    # Ensure stacked/residual variants land in models/stacked_pinn
+    if [ -d "checkpoints/stacked_pinn" ]; then
+        cp checkpoints/stacked_pinn/*_best.pt models/stacked_pinn/ 2>/dev/null || true
+        cp checkpoints/stacked_pinn/*_history.json models/stacked_pinn/ 2>/dev/null || true
+    fi
+
+    MODEL_COUNT=$(find models -maxdepth 2 -type f \( -name "*_best.pt" -o -name "*_best.pth" \) | wc -l | tr -d ' ')
+    echo -e "${GREEN}$(timestamp) ✓ Synced ${MODEL_COUNT} checkpoint(s) into models/ for the web app${NC}"
+    debug_msg "Model sync complete; models directory=$(pwd)/models"
+}
+
+# Normalize/sync trained model artifacts so the web API can discover them
+sync_models_for_webapp() {
+    section_header "Syncing Trained Models for Web App"
+
+    # Normalize directory name (some runs created capitalized 'Models')
+    if [ -d "Models" ] && [ ! -d "models" ]; then
+        debug_msg "Renaming Models -> models for backend compatibility"
+        mv Models models
+    elif [ -d "Models" ] && [ -d "models" ]; then
+        debug_msg "Merging Models into models/"
+        rsync -a Models/ models/ 2>/dev/null || cp -R Models/. models/
+    fi
+
+    mkdir -p models models/stacked_pinn
+
+    # Copy checkpoints/histories from checkpoints/ (used by some scripts)
+    if [ -d "checkpoints" ]; then
+        find checkpoints -maxdepth 2 -type f \( -name "*_best.pt" -o -name "*_best.pth" -o -name "*_history.json" \) -print0 \
+        | while IFS= read -r -d '' file; do
+            dest="models/$(basename "$file")"
+            if [ ! -f "$dest" ]; then
+                debug_msg "Syncing $(basename "$file") from checkpoints to models/"
+                cp "$file" "$dest"
+            fi
+        done
+    fi
+
+    # Ensure stacked/residual variants land in models/stacked_pinn
+    if [ -d "checkpoints/stacked_pinn" ]; then
+        cp checkpoints/stacked_pinn/*_best.pt models/stacked_pinn/ 2>/dev/null || true
+        cp checkpoints/stacked_pinn/*_history.json models/stacked_pinn/ 2>/dev/null || true
+    fi
+
+    MODEL_COUNT=$(find models -maxdepth 2 -type f \( -name "*_best.pt" -o -name "*_best.pth" \) | wc -l | tr -d ' ')
+    echo -e "${GREEN}$(timestamp) ✓ Synced ${MODEL_COUNT} checkpoint(s) into models/ for the web app${NC}"
+    debug_msg "Model sync complete; models directory=$(pwd)/models"
+}
+
 # Initial setup
 debug_msg "Run script started"
 debug_msg "Logging to: $LOGFILE"
@@ -97,7 +173,10 @@ show_menu() {
     echo "16) Launch Backtesting Dashboard"
     echo "17) Recompute All Metrics (Fix Consistency)"
     echo "18) Launch Training Visualizations Dashboard"
-    echo "19) Exit"
+    echo "19) Generate Dissertation Figures"
+    echo "20) Research-Grade Training (Standalone Script)"
+    echo "21) Launch Full Web App (Backend + Frontend)"
+    echo "22) Exit"
     echo ""
 }
 
@@ -218,6 +297,7 @@ quick_demo() {
         STEP_TIME=$((SECONDS - STEP_START))
         echo -e "${GREEN}$(timestamp) ✓ Model trained successfully (${STEP_TIME}s)${NC}"
         debug_msg "Training completed in $STEP_TIME seconds"
+        sync_models_for_webapp
     else
         echo -e "${RED}$(timestamp) [ERROR] Training failed${NC}"
         debug_msg "Training failed, aborting demo"
@@ -293,6 +373,7 @@ train_pinn() {
         TRAIN_TIME=$((SECONDS - TRAIN_START))
         echo -e "${GREEN}$(timestamp) ✓ PINN model trained (${TRAIN_TIME}s)${NC}"
         debug_msg "PINN training completed in $TRAIN_TIME seconds"
+        sync_models_for_webapp
     else
         echo -e "${RED}$(timestamp) [ERROR] Training failed${NC}"
         debug_msg "PINN training failed"
@@ -334,6 +415,7 @@ train_all() {
             MODEL_TIME=$((SECONDS - MODEL_START))
             echo -e "${GREEN}$(timestamp) ✓ $model trained successfully (${MODEL_TIME}s)${NC}"
             debug_msg "$model training completed in $MODEL_TIME seconds"
+            sync_models_for_webapp
         else
             echo -e "${RED}$(timestamp) [ERROR] $model training failed${NC}"
             debug_msg "$model training failed"
@@ -655,6 +737,8 @@ run_complete_pipeline() {
     debug_msg "Complete pipeline finished in $PIPELINE_TIME seconds"
     debug_msg "Pipeline summary: $TOTAL_MODELS models trained with $epochs epochs each"
 
+    sync_models_for_webapp
+
     echo -e "${YELLOW}Next steps:${NC}"
     echo "  • Run option 5 to launch the web interface"
     echo "  • Run option 6 to execute tests"
@@ -732,6 +816,7 @@ run_pinn_comparison() {
         STEP_TIME=$((SECONDS - STEP_START))
         echo -e "${GREEN}$(timestamp) ✓ PINN comparison completed successfully (${STEP_TIME}s)${NC}"
         debug_msg "PINN comparison completed in $STEP_TIME seconds"
+        sync_models_for_webapp
     else
         echo -e "${RED}$(timestamp) [ERROR] PINN comparison failed${NC}"
         debug_msg "PINN comparison failed"
@@ -898,6 +983,7 @@ run_full_model_pipeline() {
             MODEL_TIME=$((SECONDS - MODEL_START))
             echo -e "${GREEN}$(timestamp) ✓ $model trained successfully (${MODEL_TIME}s)${NC}"
             debug_msg "$model training completed in $MODEL_TIME seconds"
+            sync_models_for_webapp
         else
             BASELINE_FAILED=$((BASELINE_FAILED + 1))
             echo -e "${YELLOW}$(timestamp) Warning: $model training failed, continuing...${NC}"
@@ -910,6 +996,7 @@ run_full_model_pipeline() {
     echo -e "${GREEN}$(timestamp) ✓ Baseline phase complete: $((5 - BASELINE_FAILED))/5 models trained (${BASELINE_TIME}s)${NC}"
     debug_msg "Baseline phase: $((5 - BASELINE_FAILED)) succeeded, $BASELINE_FAILED failed"
     echo ""
+    sync_models_for_webapp
 
     # ========== PHASE 3: PINN VARIANTS ==========
     section_header "PHASE 3/5: Training PINN Variants (6 models)"
@@ -930,6 +1017,7 @@ run_full_model_pipeline() {
         PINN_TIME=$((SECONDS - PINN_START))
         echo -e "${GREEN}$(timestamp) ✓ All 6 PINN variants trained successfully (${PINN_TIME}s)${NC}"
         debug_msg "PINN variants phase completed in $PINN_TIME seconds"
+        sync_models_for_webapp
     else
         echo -e "${YELLOW}$(timestamp) Warning: PINN variants training had issues, continuing...${NC}"
         debug_msg "PINN variants training had failures"
@@ -965,6 +1053,7 @@ run_full_model_pipeline() {
             MODEL_TIME=$((SECONDS - MODEL_START))
             echo -e "${GREEN}$(timestamp) ✓ ${MODEL_UPPER}PINN trained successfully (${MODEL_TIME}s)${NC}"
             debug_msg "$model_type PINN training completed in $MODEL_TIME seconds"
+            sync_models_for_webapp
         else
             ADVANCED_FAILED=$((ADVANCED_FAILED + 1))
             echo -e "${YELLOW}$(timestamp) Warning: ${MODEL_UPPER}PINN training failed, continuing...${NC}"
@@ -977,6 +1066,7 @@ run_full_model_pipeline() {
     echo -e "${GREEN}$(timestamp) ✓ Advanced PINN phase complete: $((2 - ADVANCED_FAILED))/2 models trained (${ADVANCED_TIME}s)${NC}"
     debug_msg "Advanced PINN phase: $((2 - ADVANCED_FAILED)) succeeded, $ADVANCED_FAILED failed"
     echo ""
+    sync_models_for_webapp
 
     # ========== PHASE 5: UNIFIED EVALUATION & DASHBOARD ==========
     section_header "PHASE 5/5: Unified Evaluation & Dashboard"
@@ -1155,6 +1245,7 @@ train_baseline_models() {
             MODEL_TIME=$((SECONDS - MODEL_START))
             echo -e "${GREEN}$(timestamp) ✓ $model trained successfully (${MODEL_TIME}s)${NC}"
             debug_msg "$model training completed in $MODEL_TIME seconds"
+            sync_models_for_webapp
         else
             FAILED=$((FAILED + 1))
             echo -e "${YELLOW}$(timestamp) Warning: $model training failed${NC}"
@@ -1178,6 +1269,7 @@ train_baseline_models() {
     fi
 
     debug_msg "Baseline training completed: $((TOTAL - FAILED)) succeeded, $FAILED failed"
+    sync_models_for_webapp
 }
 
 # Function to compute financial metrics for all models
@@ -1505,6 +1597,96 @@ recompute_all_metrics() {
     echo ""
 }
 
+# Function to generate dissertation figures
+generate_dissertation_figures() {
+    section_header "Generating Dissertation-Quality Figures"
+    debug_msg "Starting dissertation figure generation..."
+
+    echo -e "${YELLOW}$(timestamp) Generating publication-quality visualizations...${NC}"
+    echo ""
+    echo "This will generate figures for:"
+    echo "  1. Core Forecast Accuracy (predicted vs realized, residuals)"
+    echo "  2. Loss and Calibration Diagnostics (QLIKE, PIT, VaR)"
+    echo "  3. Economic Performance (equity curves, Sharpe, drawdown)"
+    echo "  4. Model Stability & Sensitivity Analysis"
+    echo "  5. Physics Compliance (SDE residuals, learned parameters)"
+    echo "  6. Model Comparison Framework (PINN vs GARCH vs LSTM)"
+    echo ""
+
+    # Check if script exists
+    if [ ! -f "scripts/dissertation_visualizations.py" ]; then
+        echo -e "${RED}$(timestamp) [ERROR] scripts/dissertation_visualizations.py not found${NC}"
+        debug_msg "Dissertation visualization script not found"
+        return 1
+    fi
+
+    echo "Select output format:"
+    echo "1) PDF (recommended for LaTeX)"
+    echo "2) PNG (for presentations)"
+    echo "3) SVG (for web)"
+    echo ""
+    read -p "Enter choice [1-3]: " format_choice
+
+    case $format_choice in
+        1) FORMAT="pdf" ;;
+        2) FORMAT="png" ;;
+        3) FORMAT="svg" ;;
+        *) FORMAT="pdf" ;;
+    esac
+
+    echo ""
+    read -p "Use synthetic data for demo? [y/N]: " use_synthetic
+    SYNTHETIC_FLAG=""
+    if [[ "$use_synthetic" =~ ^[Yy]$ ]]; then
+        SYNTHETIC_FLAG="--synthetic"
+    fi
+
+    debug_msg "Format: $FORMAT, Synthetic: $SYNTHETIC_FLAG"
+    debug_msg "Command: python3 scripts/dissertation_visualizations.py --format $FORMAT $SYNTHETIC_FLAG"
+    FIGURES_START=$SECONDS
+
+    mkdir -p figures/dissertation
+
+    echo -e "${CYAN}$(timestamp) Generating figures...${NC}"
+    echo ""
+
+    if python3 scripts/dissertation_visualizations.py --format $FORMAT --output figures/dissertation $SYNTHETIC_FLAG 2>&1 | while IFS= read -r line; do
+        echo "$line"
+        if [[ "$line" =~ "Generating" ]] || [[ "$line" =~ "Saved" ]] || [[ "$line" =~ "✓" ]]; then
+            debug_msg "figures: $line"
+        fi
+    done; then
+        FIGURES_TIME=$((SECONDS - FIGURES_START))
+        echo ""
+        echo -e "${GREEN}$(timestamp) ✓ Dissertation figures generated successfully (${FIGURES_TIME}s)${NC}"
+        debug_msg "Figure generation completed in $FIGURES_TIME seconds"
+    else
+        echo -e "${RED}$(timestamp) [ERROR] Figure generation failed${NC}"
+        debug_msg "Dissertation figure generation failed"
+        return 1
+    fi
+
+    echo ""
+    echo -e "${CYAN}Figures saved to: figures/dissertation/${NC}"
+    echo ""
+    echo "Generated files include:"
+    echo "  • fig1_predicted_vs_realized.$FORMAT - Core forecast visualization"
+    echo "  • fig2_residual_diagnostics.$FORMAT - Residual analysis"
+    echo "  • fig4_loss_evolution.$FORMAT - QLIKE/MSE over time"
+    echo "  • fig5_pit_histogram.$FORMAT - Probability calibration"
+    echo "  • fig8_equity_curve.$FORMAT - Strategy performance"
+    echo "  • fig12_physics_residuals.$FORMAT - SDE compliance"
+    echo "  • fig15_model_comparison.$FORMAT - Multi-model comparison"
+    echo "  • performance_table.csv - Summary statistics"
+    echo "  • performance_table.tex - LaTeX table"
+    echo ""
+    echo -e "${YELLOW}Next steps:${NC}"
+    echo "  • Include figures in your dissertation LaTeX document"
+    echo "  • Use performance_table.tex for results tables"
+    echo "  • Run with --show flag to preview figures interactively"
+    echo ""
+}
+
 # Function to launch training visualizations dashboard
 launch_training_visualizations() {
     section_header "Launching Training Visualizations Dashboard"
@@ -1537,6 +1719,243 @@ launch_training_visualizations() {
     streamlit run src/web/training_dashboard.py --server.port 8503
 }
 
+# Function to run research-grade training (standalone script)
+run_research_training() {
+    section_header "Research-Grade Training (Standalone Script)"
+    debug_msg "Starting research-grade training menu..."
+
+    echo -e "${YELLOW}$(timestamp) Research-Grade Neural Network Training${NC}"
+    echo ""
+    echo "This uses the standalone training script with research-locked parameters:"
+    echo ""
+    echo "  Research Config (Locked for Fair Comparison):"
+    echo "    • Epochs: 100 (full training for convergence)"
+    echo "    • Batch Size: 16 (better gradient estimates)"
+    echo "    • Learning Rate: 0.0005 (stability with deep models)"
+    echo "    • Hidden Dim: 512 (deep architecture)"
+    echo "    • Num Layers: 4 (hierarchical features)"
+    echo "    • Dropout: 0.15 (moderate regularization)"
+    echo "    • Sequence Length: 180 (6 months lookback)"
+    echo "    • Early Stopping: DISABLED (all models train full epochs)"
+    echo ""
+    echo "Select training mode:"
+    echo ""
+    echo "1) Train single model"
+    echo "2) Train all baseline models (LSTM, GRU, BiLSTM, Attention, Transformer)"
+    echo "3) Train all PINN models (6 variants)"
+    echo "4) Train all advanced models (Stacked, Residual)"
+    echo "5) Train ALL models (13 total - full research run)"
+    echo "6) Back to Main Menu"
+    echo ""
+
+    read -p "Enter choice [1-6]: " training_choice
+    debug_msg "User selected training option: $training_choice"
+    echo ""
+
+    # Activate backend venv for training
+    if [ -d "backend/venv" ]; then
+        debug_msg "Activating backend virtual environment..."
+        source backend/venv/bin/activate
+    fi
+
+    case $training_choice in
+        1)
+            echo "Available models:"
+            echo "  Baseline: lstm, gru, bilstm, attention_lstm, transformer"
+            echo "  PINN: baseline_pinn, gbm, ou, black_scholes, gbm_ou, global"
+            echo "  Advanced: stacked, residual"
+            echo ""
+            read -p "Enter model key: " model_key
+            debug_msg "Training single model: $model_key"
+            debug_msg "Command: python scripts/train_models.py --model $model_key"
+
+            echo ""
+            echo -e "${CYAN}$(timestamp) Training $model_key with research config...${NC}"
+            TRAIN_START=$SECONDS
+
+            if python scripts/train_models.py --model "$model_key" 2>&1 | while IFS= read -r line; do
+                echo "$line"
+                if [[ "$line" =~ "Epoch" ]] || [[ "$line" =~ "RMSE" ]] || [[ "$line" =~ "Sharpe" ]]; then
+                    debug_msg "training: $line"
+                fi
+            done; then
+                TRAIN_TIME=$((SECONDS - TRAIN_START))
+                echo -e "${GREEN}$(timestamp) ✓ Training completed (${TRAIN_TIME}s)${NC}"
+                sync_models_for_webapp
+            else
+                echo -e "${RED}$(timestamp) Training failed${NC}"
+            fi
+            ;;
+        2)
+            debug_msg "Training all baseline models"
+            debug_msg "Command: python scripts/train_models.py --type baseline"
+
+            echo -e "${CYAN}$(timestamp) Training all baseline models...${NC}"
+            TRAIN_START=$SECONDS
+
+            if python scripts/train_models.py --type baseline 2>&1 | while IFS= read -r line; do
+                echo "$line"
+            done; then
+                TRAIN_TIME=$((SECONDS - TRAIN_START))
+                echo -e "${GREEN}$(timestamp) ✓ Baseline training completed (${TRAIN_TIME}s)${NC}"
+                sync_models_for_webapp
+            else
+                echo -e "${RED}$(timestamp) Baseline training failed${NC}"
+            fi
+            ;;
+        3)
+            debug_msg "Training all PINN models"
+            debug_msg "Command: python scripts/train_models.py --type pinn"
+
+            echo -e "${CYAN}$(timestamp) Training all PINN models...${NC}"
+            TRAIN_START=$SECONDS
+
+            if python scripts/train_models.py --type pinn 2>&1 | while IFS= read -r line; do
+                echo "$line"
+            done; then
+                TRAIN_TIME=$((SECONDS - TRAIN_START))
+                echo -e "${GREEN}$(timestamp) ✓ PINN training completed (${TRAIN_TIME}s)${NC}"
+                sync_models_for_webapp
+            else
+                echo -e "${RED}$(timestamp) PINN training failed${NC}"
+            fi
+            ;;
+        4)
+            debug_msg "Training all advanced models"
+            debug_msg "Command: python scripts/train_models.py --type advanced"
+
+            echo -e "${CYAN}$(timestamp) Training all advanced models...${NC}"
+            TRAIN_START=$SECONDS
+
+            if python scripts/train_models.py --type advanced 2>&1 | while IFS= read -r line; do
+                echo "$line"
+            done; then
+                TRAIN_TIME=$((SECONDS - TRAIN_START))
+                echo -e "${GREEN}$(timestamp) ✓ Advanced training completed (${TRAIN_TIME}s)${NC}"
+                sync_models_for_webapp
+            else
+                echo -e "${RED}$(timestamp) Advanced training failed${NC}"
+            fi
+            ;;
+        5)
+            debug_msg "Training ALL models"
+            debug_msg "Command: python scripts/train_models.py --all"
+
+            echo -e "${CYAN}$(timestamp) Training ALL 13 models (this will take a while)...${NC}"
+            echo ""
+            echo "Models to train:"
+            echo "  Baseline (5): lstm, gru, bilstm, attention_lstm, transformer"
+            echo "  PINN (6): baseline_pinn, gbm, ou, black_scholes, gbm_ou, global"
+            echo "  Advanced (2): stacked, residual"
+            echo ""
+
+            TRAIN_START=$SECONDS
+
+            if python scripts/train_models.py --all 2>&1 | while IFS= read -r line; do
+                echo "$line"
+            done; then
+                TRAIN_TIME=$((SECONDS - TRAIN_START))
+                echo ""
+                echo -e "${GREEN}$(timestamp) ✓ Full research training completed!${NC}"
+                echo -e "${CYAN}  Total time: $((TRAIN_TIME / 60))m $((TRAIN_TIME % 60))s${NC}"
+                sync_models_for_webapp
+            else
+                echo -e "${RED}$(timestamp) Training had errors${NC}"
+            fi
+            ;;
+        6)
+            echo -e "${CYAN}$(timestamp) Returning to main menu...${NC}"
+            return 0
+            ;;
+        *)
+            echo -e "${RED}$(timestamp) Invalid option${NC}"
+            return 1
+            ;;
+    esac
+
+    echo ""
+    echo -e "${CYAN}Results saved to: results/<model>_results.json${NC}"
+    echo -e "${CYAN}Checkpoints saved to: models/<model>_best.pt${NC}"
+    echo ""
+    echo -e "${YELLOW}Next steps:${NC}"
+    echo "  • Option 21: Launch Full Web App to view results"
+    echo "  • Option 14: View metrics in terminal"
+    echo ""
+}
+
+# Function to launch full web app (backend + frontend)
+launch_full_webapp() {
+    section_header "Launching Full Web App (Backend + Frontend)"
+    debug_msg "Starting full web application..."
+
+    echo -e "${YELLOW}$(timestamp) Launching Full Web Application...${NC}"
+    echo ""
+    echo "This will start:"
+    echo "  • Backend API (FastAPI) at http://localhost:8000"
+    echo "  • Frontend UI (React) at http://localhost:5173"
+    echo ""
+
+    # Check if backend exists
+    if [ ! -d "backend" ]; then
+        echo -e "${RED}$(timestamp) [ERROR] backend/ directory not found${NC}"
+        return 1
+    fi
+
+    # Check if frontend exists
+    if [ ! -d "frontend" ]; then
+        echo -e "${RED}$(timestamp) [ERROR] frontend/ directory not found${NC}"
+        return 1
+    fi
+
+    # Start backend in background
+    echo -e "${BLUE}$(timestamp) Starting Backend API...${NC}"
+    debug_msg "Command: cd backend && source venv/bin/activate && python run.py"
+
+    (
+        cd backend
+        if [ -d "venv" ]; then
+            source venv/bin/activate
+        fi
+        python run.py 2>&1 | while IFS= read -r line; do
+            echo -e "${CYAN}[BACKEND] $line${NC}"
+        done
+    ) &
+    BACKEND_PID=$!
+    debug_msg "Backend started with PID: $BACKEND_PID"
+
+    # Wait for backend to be ready
+    echo -e "${YELLOW}$(timestamp) Waiting for backend to start...${NC}"
+    sleep 3
+
+    # Start frontend
+    echo -e "${BLUE}$(timestamp) Starting Frontend UI...${NC}"
+    debug_msg "Command: cd frontend && npm run dev"
+
+    (
+        cd frontend
+        npm run dev 2>&1 | while IFS= read -r line; do
+            echo -e "${MAGENTA}[FRONTEND] $line${NC}"
+        done
+    ) &
+    FRONTEND_PID=$!
+    debug_msg "Frontend started with PID: $FRONTEND_PID"
+
+    echo ""
+    echo -e "${GREEN}$(timestamp) ✓ Web Application Started!${NC}"
+    echo ""
+    echo "Access the application:"
+    echo -e "${CYAN}  • Frontend (React): http://localhost:5173${NC}"
+    echo -e "${CYAN}  • Backend API: http://localhost:8000${NC}"
+    echo -e "${CYAN}  • API Docs: http://localhost:8000/docs${NC}"
+    echo ""
+    echo -e "${YELLOW}Press Ctrl+C to stop both servers${NC}"
+    echo ""
+
+    # Wait for either process to exit
+    trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit 0" INT TERM
+    wait $BACKEND_PID $FRONTEND_PID
+}
+
 # Main loop
 debug_msg "Entering main menu loop"
 MENU_ITERATIONS=0
@@ -1546,7 +1965,7 @@ while true; do
     debug_msg "Menu iteration: $MENU_ITERATIONS"
 
     show_menu
-    read -p "$(echo -e ${CYAN})Enter your choice [1-19]: $(echo -e ${NC})" choice
+    read -p "$(echo -e ${CYAN})Enter your choice [1-22]: $(echo -e ${NC})" choice
     debug_msg "User selected option: $choice"
 
     case $choice in
@@ -1647,7 +2066,23 @@ while true; do
             break
             ;;
         19)
-            debug_msg "Option 19: Exit selected"
+            debug_msg "Option 19: Generate Dissertation Figures selected"
+            generate_dissertation_figures
+            debug_msg "Dissertation figures generated, returning to menu"
+            ;;
+        20)
+            debug_msg "Option 20: Research-Grade Training selected"
+            run_research_training
+            debug_msg "Research training completed, returning to menu"
+            ;;
+        21)
+            debug_msg "Option 21: Launch Full Web App selected"
+            launch_full_webapp
+            debug_msg "Web app closed, exiting menu"
+            break
+            ;;
+        22)
+            debug_msg "Option 22: Exit selected"
             echo -e "${GREEN}$(timestamp) Exiting...${NC}"
             debug_msg "Total menu iterations: $MENU_ITERATIONS"
             debug_msg "Total execution time: $SECONDS seconds"
@@ -1656,7 +2091,7 @@ while true; do
             ;;
         *)
             debug_msg "Invalid option entered: $choice"
-            echo -e "${RED}$(timestamp) [ERROR] Invalid option. Please select 1-19${NC}"
+            echo -e "${RED}$(timestamp) [ERROR] Invalid option. Please select 1-22${NC}"
             ;;
     esac
 done

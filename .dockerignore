@@ -1,0 +1,68 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+*.egg
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.mypy_cache
+.ruff_cache
+
+# Virtual environments
+venv
+.venv
+env
+.env.local
+backend/venv
+
+# Node.js (frontend has its own .dockerignore)
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local data (mount as volumes instead)
+postgres-data/
+data/raw/*.csv
+data/processed/*.parquet
+
+# Documentation (not needed in container)
+*.md
+!README.md
+dissertation/
+docs/
+
+# Tests (optional - include if you want to run tests in container)
+# tests/
+
+# Temporary files
+*.tmp
+*.temp
+.cache
+
+# Streamlit (legacy - not used)
+src/web/

@@ -69,8 +69,10 @@ class TestFixedRiskSizer:
 
         result = sizer.calculate(current_capital=100000, current_price=50000)
 
-        # 2% of 100000 = 2000, at $50000 = 0 shares (can't afford 1)
-        assert result.position_size == 0
+        # 2% of 100000 = 2000, at $50000 = 0.04 fractional shares
+        # (Modern brokers support fractional shares)
+        assert result.position_size == pytest.approx(0.04, rel=0.01)
+        assert result.dollar_amount == pytest.approx(2000.0, rel=0.01)
 
 
 class TestKellyCriterionSizer:

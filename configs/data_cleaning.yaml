@@ -1,0 +1,23 @@
+# Default data cleaning policy (starter values; tune per dataset)
+missing:
+  method: "ffill"          # drop|ffill|bfill|linear|mean|median|zero
+  forward_fill_limit: 5
+  backward_fill_limit: 5
+  interpolate: true
+  drop_if_missing_pct: 0.1
+
+outliers:
+  method: "percentile"     # iqr|zscore|mad|percentile
+  lower_pct: 0.01
+  upper_pct: 0.99
+  treatment: "winsorize"   # remove|clip|winsorize|impute|flag
+  zscore_threshold: 3.0
+  iqr_multiplier: 1.5
+
+quality:
+  min_required_data_pct: 0.8
+  log_all_changes: true
+
+# Notes:
+# - The code currently reads these values manually; keep names consistent when
+#   wiring configs into DataCleaner init.

@@ -9,7 +9,14 @@ import pytest
 import torch
 import torch.nn as nn
 import numpy as np
-from scipy.stats import norm
+
+# Optional scipy import for analytical Black-Scholes tests
+try:
+    from scipy.stats import norm
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    norm = None
 
 import sys
 from pathlib import Path
@@ -65,6 +72,7 @@ class TestBlackScholesDerivatives:
         assert torch.isclose(dy_dx, expected, atol=1e-5)
 
 
+@pytest.mark.skipif(not HAS_SCIPY, reason="scipy not installed")
 class TestBlackScholesFormulas:
     """Test Black-Scholes analytical formulas"""
 

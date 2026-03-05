@@ -1,0 +1,27 @@
+# Key market stress windows and macro events (editable starter set)
+windows:
+  - name: "GFC"
+    start: "2008-09-01"
+    end: "2009-03-31"
+    type: "crisis"
+  - name: "COVID_crash"
+    start: "2020-02-15"
+    end: "2020-04-15"
+    type: "crisis"
+  - name: "Inflation_peak"
+    start: "2022-06-01"
+    end: "2022-10-15"
+    type: "macro"
+  - name: "SVB_shock"
+    start: "2023-03-08"
+    end: "2023-03-31"
+    type: "liquidity"
+
+volatility_regimes:
+  low: 0.15      # annualized vol threshold
+  medium: 0.25
+  high: 1.0
+
+notes: |
+  This file is a seed list. Extend with Fed meetings, earnings seasons, and
+  asset-specific shocks as needed for regime/stress evaluation.

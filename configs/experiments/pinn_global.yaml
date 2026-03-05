@@ -1,0 +1,97 @@
+# PINN with All Physics Constraints
+# Combines GBM, OU, and Black-Scholes physics
+
+name: pinn_global
+description: PINN with all physics constraints (GBM + OU + Black-Scholes)
+version: "1.0.0"
+author: ""
+
+# Model Configuration
+model:
+  model_type: global
+  input_dim: 5
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+  bidirectional: false
+  # Physics parameters - balanced weighting
+  lambda_gbm: 0.05    # Trend/drift
+  lambda_ou: 0.05     # Mean reversion
+  lambda_bs: 0.03     # No-arbitrage
+  mu: 0.05            # Drift rate
+  sigma: 0.2          # Volatility
+  kappa: 0.5          # Mean reversion speed
+  theta: 0.0          # Long-term mean
+  r: 0.02             # Risk-free rate
+
+# Training Configuration
+training:
+  epochs: 150
+  batch_size: 32
+  learning_rate: 0.0005
+  weight_decay: 0.00001
+  optimizer: adam
+  scheduler: cosine
+  scheduler_patience: 10
+  scheduler_factor: 0.5
+  early_stopping: true
+  early_stopping_patience: 25
+  gradient_clip_norm: 1.0
+  # PINN-specific - use adaptive weighting for multi-physics
+  adaptive_weighting: gradnorm
+  curriculum_enabled: true
+  curriculum_warmup_epochs: 15
+  curriculum_ramp_epochs: 30
+  curriculum_schedule: exponential
+
+# Data Configuration
+data:
+  tickers:
+    - AAPL
+    - MSFT
+    - GOOGL
+    - AMZN
+    - NVDA
+  start_date: "2015-01-01"
+  end_date: "2024-01-01"
+  sequence_length: 30
+  forecast_horizon: 1
+  feature_columns:
+    - close
+    - volume
+    - log_return
+    - rolling_volatility_20
+    - rolling_volatility_60
+    - rsi_14
+    - momentum_20
+  target_column: close
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  normalization: standard
+  window_strategy: expanding
+  n_folds: 5
+
+# Evaluation Configuration
+evaluation:
+  compute_rolling_metrics: true
+  rolling_window_size: 63
+  transaction_cost: 0.003
+  risk_free_rate: 0.02
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+  n_seeds: 5
+  analyze_regimes: true
+  volatility_thresholds:
+    - 0.15
+    - 0.25
+
+# Reproducibility
+seed: 42
+deterministic: true
+
+# Output
+output_dir: outputs/pinn_global
+save_checkpoints: true
+save_predictions: true
+log_level: INFO

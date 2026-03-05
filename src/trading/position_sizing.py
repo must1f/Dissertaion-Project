@@ -127,7 +127,7 @@ class FixedRiskSizer(PositionSizer):
         dollar_amount = current_capital * self.risk_per_trade
 
         # Position size (number of shares)
-        position_size = int(dollar_amount / current_price)
+        position_size = round(dollar_amount / current_price, 4)
 
         # Actual fraction invested
         actual_fraction = (position_size * current_price) / current_capital
@@ -260,7 +260,7 @@ class KellyCriterionSizer(PositionSizer):
         dollar_amount = current_capital * adjusted_fraction
 
         # Position size (number of shares)
-        position_size = int(dollar_amount / current_price)
+        position_size = round(dollar_amount / current_price, 4)
 
         # Actual fraction invested
         actual_fraction = (position_size * current_price) / current_capital
@@ -336,7 +336,7 @@ class VolatilityBasedSizer(PositionSizer):
         dollar_amount = current_capital * fraction
 
         # Position size
-        position_size = int(dollar_amount / current_price)
+        position_size = round(dollar_amount / current_price, 4)
 
         # Actual fraction
         actual_fraction = (position_size * current_price) / current_capital
@@ -403,7 +403,7 @@ class ConfidenceBasedSizer(PositionSizer):
         dollar_amount = current_capital * adjusted_risk
 
         # Position size
-        position_size = int(dollar_amount / current_price)
+        position_size = round(dollar_amount / current_price, 4)
 
         # Actual fraction
         actual_fraction = (position_size * current_price) / current_capital

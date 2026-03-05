@@ -13,6 +13,7 @@ from typing import Dict, Tuple, Optional, Literal
 import math
 
 from ..utils.logger import get_logger
+from ..constants import DAILY_TIME_STEP
 
 logger = get_logger(__name__)
 
@@ -266,7 +267,7 @@ class StackedPINN(nn.Module):
         )
 
         # Physics loss computation
-        self.dt = 1.0 / 252.0  # Daily returns
+        self.dt = DAILY_TIME_STEP  # Daily returns
 
         logger.info(f"StackedPINN initialized: input_dim={input_dim}, "
                    f"λ_gbm={lambda_gbm}, λ_ou={lambda_ou}")
@@ -381,6 +382,54 @@ class StackedPINN(nn.Module):
 
         return torch.mean(residual ** 2)
 
+    def compute_loss(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        metadata: Dict,
+        enable_physics: bool = True
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute combined data and physics loss for training.
+
+        This method is required for the Trainer to recognize this as a PINN model.
+
+        Args:
+            predictions: Model predictions (return_pred from forward pass)
+            targets: Ground truth targets
+            metadata: Batch metadata containing 'returns' for physics loss
+            enable_physics: Whether to apply physics constraints
+
+        Returns:
+            Tuple of (total_loss, loss_dict)
+        """
+        import torch.nn.functional as F
+
+        loss_dict = {}
+
+        # Data loss (MSE)
+        data_loss = F.mse_loss(predictions, targets)
+        loss_dict['data_loss'] = data_loss.item()
+
+        total_loss = data_loss
+
+        # Physics loss if enabled
+        if enable_physics:
+            returns = metadata.get('returns', None)
+            if returns is not None:
+                physics_loss, physics_dict = self.compute_physics_loss(
+                    metadata.get('inputs', None) or torch.zeros_like(returns),
+                    returns
+                )
+                total_loss = total_loss + physics_loss
+                loss_dict.update(physics_dict)
+            else:
+                loss_dict['physics_loss'] = 0.0
+
+        loss_dict['total_loss'] = total_loss.item()
+
+        return total_loss, loss_dict
+
 
 class ResidualPINN(nn.Module):
     """
@@ -468,7 +517,7 @@ class ResidualPINN(nn.Module):
         )
 
         # Physics parameters
-        self.dt = 1.0 / 252.0
+        self.dt = DAILY_TIME_STEP
 
         logger.info(f"ResidualPINN initialized: base={base_model_type}, "
                    f"λ_gbm={lambda_gbm}, λ_ou={lambda_ou}")
@@ -573,3 +622,51 @@ class ResidualPINN(nn.Module):
         residual = dR_dt - theta * (mu - R_curr)
 
         return torch.mean(residual ** 2)
+
+    def compute_loss(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        metadata: Dict,
+        enable_physics: bool = True
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute combined data and physics loss for training.
+
+        This method is required for the Trainer to recognize this as a PINN model.
+
+        Args:
+            predictions: Model predictions (final_pred from forward pass)
+            targets: Ground truth targets
+            metadata: Batch metadata containing 'returns' for physics loss
+            enable_physics: Whether to apply physics constraints
+
+        Returns:
+            Tuple of (total_loss, loss_dict)
+        """
+        import torch.nn.functional as F
+
+        loss_dict = {}
+
+        # Data loss (MSE)
+        data_loss = F.mse_loss(predictions, targets)
+        loss_dict['data_loss'] = data_loss.item()
+
+        total_loss = data_loss
+
+        # Physics loss if enabled
+        if enable_physics:
+            returns = metadata.get('returns', None)
+            if returns is not None:
+                physics_loss, physics_dict = self.compute_physics_loss(
+                    metadata.get('inputs', None) or torch.zeros_like(returns),
+                    returns
+                )
+                total_loss = total_loss + physics_loss
+                loss_dict.update(physics_dict)
+            else:
+                loss_dict['physics_loss'] = 0.0
+
+        loss_dict['total_loss'] = total_loss.item()
+
+        return total_loss, loss_dict

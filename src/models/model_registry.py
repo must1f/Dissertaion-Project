@@ -3,6 +3,11 @@ Model Registry - Central registry for all neural network models
 
 Tracks all available models, their training status, and metadata.
 Provides model loading functionality from checkpoints.
+
+Performance optimizations:
+- Uses glob patterns instead of multiple path.exists() calls
+- Caches checkpoint locations in memory
+- Provides Streamlit-compatible caching decorator
 """
 
 from typing import Dict, List, Optional, Any
@@ -10,6 +15,7 @@ from pathlib import Path
 from dataclasses import dataclass
 import json
 from datetime import datetime
+import time
 
 import torch
 import torch.nn as nn
@@ -17,6 +23,11 @@ import torch.nn as nn
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Module-level cache for checkpoint locations (avoids repeated filesystem scans)
+_checkpoint_cache: Dict[str, Dict] = {}
+_cache_timestamp: float = 0
+_CACHE_TTL_SECONDS = 60  # Cache checkpoint locations for 60 seconds
 
 
 @dataclass
@@ -48,6 +59,25 @@ class ModelRegistry:
 
         # Define all available models
         self.models = self._define_all_models()
+
+    def list_available_models(self) -> List[Dict[str, Any]]:
+        """List available models with metadata for UI/tests."""
+        output: List[Dict[str, Any]] = []
+        for key, info in self.models.items():
+            output.append({
+                'model_key': info.model_key,
+                'model_name': info.model_name,
+                'model_type': info.model_type,
+                'architecture': info.architecture,
+                'description': info.description,
+                'physics_constraints': info.physics_constraints,
+                'trained': info.trained,
+                'checkpoint_path': str(info.checkpoint_path) if info.checkpoint_path else None,
+                'results_path': str(info.results_path) if info.results_path else None,
+                'training_date': info.training_date,
+                'epochs_trained': info.epochs_trained,
+            })
+        return output
 
     def _define_all_models(self) -> Dict[str, ModelInfo]:
         """Define all available models in the system"""
@@ -97,7 +127,7 @@ class ModelRegistry:
 
         # ========== BASIC PINN VARIANTS ==========
         models['baseline_pinn'] = ModelInfo(
-            model_key='baseline',
+            model_key='baseline_pinn',
             model_name='Baseline (Data-only)',
             model_type='pinn',
             architecture='PINN',
@@ -169,72 +199,240 @@ class ModelRegistry:
             physics_constraints={'lambda_gbm': 0.1, 'lambda_ou': 0.1}
         )
 
+        models['spectral_pinn'] = ModelInfo(
+            model_key='spectral_pinn',
+            model_name='Spectral Regime PINN',
+            model_type='advanced',
+            architecture='SpectralRegimePINN',
+            description='Spectral encoder + regime conditioning + physics constraints',
+            physics_constraints={
+                'lambda_gbm': 0.1,
+                'lambda_ou': 0.1,
+                'lambda_autocorr': 0.05,
+                'lambda_spectral': 0.05
+            }
+        )
+
+        # ========== ALIASES for API compatibility ==========
+        # Add pinn_ prefixed aliases for PINN models
+        models['pinn_baseline'] = models['baseline_pinn']
+        models['baseline'] = models['baseline_pinn']
+        models['pinn_gbm'] = models['gbm']
+        models['pinn_ou'] = models['ou']
+        models['pinn_black_scholes'] = models['black_scholes']
+        models['pinn_gbm_ou'] = models['gbm_ou']
+        models['pinn_global'] = models['global']
+        models['stacked_pinn'] = models['stacked']
+        models['residual_pinn'] = models['residual']
+
+        # ========== VOLATILITY FORECASTING MODELS ==========
+        models['vol_lstm'] = ModelInfo(
+            model_key='vol_lstm',
+            model_name='Volatility LSTM',
+            model_type='volatility',
+            architecture='VolatilityLSTM',
+            description='LSTM for volatility forecasting with Softplus output'
+        )
+
+        models['vol_gru'] = ModelInfo(
+            model_key='vol_gru',
+            model_name='Volatility GRU',
+            model_type='volatility',
+            architecture='VolatilityGRU',
+            description='GRU for volatility forecasting'
+        )
+
+        models['vol_transformer'] = ModelInfo(
+            model_key='vol_transformer',
+            model_name='Volatility Transformer',
+            model_type='volatility',
+            architecture='VolatilityTransformer',
+            description='Transformer for volatility forecasting'
+        )
+
+        models['vol_pinn'] = ModelInfo(
+            model_key='vol_pinn',
+            model_name='Volatility PINN',
+            model_type='volatility',
+            architecture='VolatilityPINN',
+            description='PINN with variance mean-reversion and GARCH constraints',
+            physics_constraints={'lambda_ou': 0.1, 'lambda_garch': 0.1, 'lambda_feller': 0.05, 'lambda_leverage': 0.05}
+        )
+
+        models['heston_pinn'] = ModelInfo(
+            model_key='heston_pinn',
+            model_name='Heston PINN',
+            model_type='volatility',
+            architecture='HestonPINN',
+            description='PINN based on Heston stochastic volatility model',
+            physics_constraints={'lambda_heston': 0.1, 'lambda_feller': 0.05, 'lambda_leverage': 0.05}
+        )
+
+        models['stacked_vol_pinn'] = ModelInfo(
+            model_key='stacked_vol_pinn',
+            model_name='Stacked Volatility PINN',
+            model_type='volatility',
+            architecture='StackedVolatilityPINN',
+            description='Advanced stacked architecture for volatility forecasting',
+            physics_constraints={'lambda_ou': 0.1, 'lambda_garch': 0.1, 'lambda_feller': 0.05, 'lambda_leverage': 0.05}
+        )
+
+        # Volatility model aliases
+        models['volatility_lstm'] = models['vol_lstm']
+        models['volatility_gru'] = models['vol_gru']
+        models['volatility_transformer'] = models['vol_transformer']
+        models['volatility_pinn'] = models['vol_pinn']
+        models['heston'] = models['heston_pinn']
+        models['stacked_volatility_pinn'] = models['stacked_vol_pinn']
+
         # Check training status for all models
         self._update_training_status(models)
 
         return models
 
     def _update_training_status(self, models: Dict[str, ModelInfo]):
-        """Check which models have been trained"""
+        """
+        Check which models have been trained.
 
+        OPTIMIZED: Uses glob patterns to scan all checkpoints at once,
+        then matches them to models. This is much faster than checking
+        individual paths for each model.
+        """
+        global _checkpoint_cache, _cache_timestamp
+
+        current_time = time.time()
+
+        # Use cached checkpoint locations if available and not expired
+        if _checkpoint_cache and (current_time - _cache_timestamp) < _CACHE_TTL_SECONDS:
+            checkpoint_map = _checkpoint_cache
+            logger.debug("Using cached checkpoint locations")
+        else:
+            # Build checkpoint map using glob (single filesystem scan)
+            checkpoint_map = self._scan_all_checkpoints()
+            _checkpoint_cache = checkpoint_map
+            _cache_timestamp = current_time
+            logger.debug(f"Scanned {len(checkpoint_map)} checkpoint files")
+
+        # Load detailed_results.json once for all PINN models
+        detailed_results_data = None
+        detailed_path = self.results_dir / 'pinn_comparison' / 'detailed_results.json'
+        if detailed_path.exists():
+            try:
+                with open(detailed_path, 'r') as f:
+                    detailed_results_data = json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                logger.debug(f"Could not load detailed results: {e}")
+
+        # Match checkpoints to models
         for model_key, model_info in models.items():
-            # Check for model checkpoints
-            possible_paths = [
-                self.models_dir / f'{model_key}_best.pt',
-                self.models_dir / f'{model_key}_best.pth',
-                self.models_dir / f'pinn_{model_key}_best.pt',
-                # Advanced PINN architectures (stacked/residual)
-                self.models_dir / 'stacked_pinn' / f'{model_key}_pinn_best.pt',
-                self.models_dir / 'stacked_pinn' / f'{model_key}_best.pt',
-            ]
+            # Check if this model has a checkpoint
+            checkpoint_path = checkpoint_map.get(model_key)
 
-            # Special handling for stacked/residual PINN models
-            if model_key == 'stacked':
-                possible_paths.insert(0, self.models_dir / 'stacked_pinn' / 'stacked_pinn_best.pt')
-            elif model_key == 'residual':
-                possible_paths.insert(0, self.models_dir / 'stacked_pinn' / 'residual_pinn_best.pt')
+            if checkpoint_path:
+                model_info.trained = True
+                model_info.checkpoint_path = checkpoint_path
+                try:
+                    model_info.training_date = datetime.fromtimestamp(
+                        checkpoint_path.stat().st_mtime
+                    ).strftime('%Y-%m-%d %H:%M')
+                except OSError:
+                    model_info.training_date = None
 
-            for path in possible_paths:
-                if path.exists():
-                    model_info.trained = True
-                    model_info.checkpoint_path = path
-                    model_info.training_date = datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M')
+                # Try to load epochs from results
+                self._load_model_epochs(model_key, model_info, detailed_results_data)
 
-                    # Try to read epochs from results
-                    results_path = self.results_dir / f'{model_key}_results.json'
-                    if not results_path.exists():
-                        results_path = self.results_dir / f'pinn_{model_key}_results.json'
-                    if not results_path.exists():
-                        results_path = self.results_dir / 'pinn_comparison' / f'{model_key}_results.json'
-                    if not results_path.exists():
-                        results_path = self.models_dir / 'stacked_pinn' / f'{model_key}_pinn_results.json'
+    def _scan_all_checkpoints(self) -> Dict[str, Path]:
+        """
+        Scan all checkpoint files at once using glob patterns.
+        Returns a mapping of model_key -> checkpoint_path.
 
-                    # Try individual result file first
-                    if results_path.exists():
-                        try:
-                            with open(results_path, 'r') as f:
-                                results = json.load(f)
-                                if 'history' in results and 'train_loss' in results['history']:
-                                    model_info.epochs_trained = len(results['history']['train_loss'])
-                                model_info.results_path = results_path
-                        except (json.JSONDecodeError, IOError, KeyError) as e:
-                            logger.debug(f"Could not load results from {results_path}: {e}")
-                    else:
-                        # Try loading from detailed_results.json for PINN models
-                        detailed_path = self.results_dir / 'pinn_comparison' / 'detailed_results.json'
-                        if detailed_path.exists() and model_info.model_type == 'pinn':
-                            try:
-                                with open(detailed_path, 'r') as f:
-                                    detailed_results = json.load(f)
-                                    for variant_result in detailed_results:
-                                        if variant_result.get('variant_key') == model_key:
-                                            if 'history' in variant_result and 'train_loss' in variant_result['history']:
-                                                model_info.epochs_trained = len(variant_result['history']['train_loss'])
-                                            model_info.results_path = detailed_path
-                                            break
-                            except (json.JSONDecodeError, IOError, KeyError) as e:
-                                logger.debug(f"Could not load detailed results: {e}")
-                    break
+        This is much faster than checking individual paths because:
+        1. Single filesystem traversal instead of multiple exists() calls
+        2. Results cached for subsequent calls
+        """
+        checkpoint_map = {}
+
+        # Scan main models directory
+        if self.models_dir.exists():
+            for pt_file in self.models_dir.glob('*_best.pt'):
+                # Extract model key from filename
+                # e.g., "lstm_best.pt" -> "lstm", "pinn_gbm_best.pt" -> "pinn_gbm" or "gbm"
+                name = pt_file.stem.replace('_best', '')
+                checkpoint_map[name] = pt_file
+
+                # Also map without pinn_ prefix for easier lookup
+                if name.startswith('pinn_'):
+                    short_name = name[5:]  # Remove 'pinn_' prefix
+                    if short_name not in checkpoint_map:
+                        checkpoint_map[short_name] = pt_file
+                    if 'baseline' in short_name and 'baseline_pinn' not in checkpoint_map:
+                        checkpoint_map['baseline_pinn'] = pt_file
+
+            # Also check .pth files
+            for pth_file in self.models_dir.glob('*_best.pth'):
+                name = pth_file.stem.replace('_best', '')
+                if name not in checkpoint_map:
+                    checkpoint_map[name] = pth_file
+                if name.startswith('pinn_'):
+                    short_name = name[5:]
+                    if short_name not in checkpoint_map:
+                        checkpoint_map[short_name] = pth_file
+                    if 'baseline' in short_name and 'baseline_pinn' not in checkpoint_map:
+                        checkpoint_map['baseline_pinn'] = pth_file
+
+        # Scan stacked_pinn subdirectory
+        stacked_dir = self.models_dir / 'stacked_pinn'
+        if stacked_dir.exists():
+            for pt_file in stacked_dir.glob('*_best.pt'):
+                name = pt_file.stem.replace('_best', '').replace('_pinn', '')
+                # Map both full and short names
+                checkpoint_map[name] = pt_file
+
+                # Special handling for stacked/residual
+                if 'stacked_pinn' in pt_file.stem:
+                    checkpoint_map['stacked'] = pt_file
+                    checkpoint_map['stacked_pinn'] = pt_file
+                elif 'residual_pinn' in pt_file.stem:
+                    checkpoint_map['residual'] = pt_file
+                    checkpoint_map['residual_pinn'] = pt_file
+
+        return checkpoint_map
+
+    def _load_model_epochs(
+        self,
+        model_key: str,
+        model_info: ModelInfo,
+        detailed_results_data: Optional[List] = None
+    ):
+        """Load epochs trained from results files."""
+        # Try multiple result file patterns
+        result_patterns = [
+            self.results_dir / f'{model_key}_results.json',
+            self.results_dir / f'pinn_{model_key}_results.json',
+            self.results_dir / 'pinn_comparison' / f'{model_key}_results.json',
+            self.models_dir / 'stacked_pinn' / f'{model_key}_pinn_results.json',
+        ]
+
+        for results_path in result_patterns:
+            if results_path.exists():
+                try:
+                    with open(results_path, 'r') as f:
+                        results = json.load(f)
+                        if 'history' in results and 'train_loss' in results['history']:
+                            model_info.epochs_trained = len(results['history']['train_loss'])
+                        model_info.results_path = results_path
+                        return
+                except (json.JSONDecodeError, IOError, KeyError) as e:
+                    logger.debug(f"Could not load results from {results_path}: {e}")
+
+        # Try detailed_results.json for PINN models
+        if detailed_results_data and model_info.model_type == 'pinn':
+            for variant_result in detailed_results_data:
+                if variant_result.get('variant_key') == model_key:
+                    if 'history' in variant_result and 'train_loss' in variant_result['history']:
+                        model_info.epochs_trained = len(variant_result['history']['train_loss'])
+                    model_info.results_path = self.results_dir / 'pinn_comparison' / 'detailed_results.json'
+                    return
 
     def get_all_models(self) -> Dict[str, ModelInfo]:
         """Get all models"""
@@ -286,11 +484,57 @@ class ModelRegistry:
         device = device or torch.device('cpu')
 
         try:
-            # Load checkpoint
-            checkpoint = torch.load(model_info.checkpoint_path, map_location=device)
+            # Load checkpoint to CPU first to avoid MPS/CUDA device compatibility issues
+            # Then move to target device after loading
+            # weights_only=False is safe here as these are our own trained model checkpoints
+            checkpoint = torch.load(model_info.checkpoint_path, map_location='cpu', weights_only=False)
 
-            # Instantiate model based on architecture
-            model = self._instantiate_model(model_info, input_dim)
+            # Extract training-time hyperparameters from checkpoint if present
+            cfg = checkpoint.get('config', {}) if isinstance(checkpoint, dict) else {}
+            model_cfg = cfg.get('model', {}) if isinstance(cfg, dict) else {}
+            research_cfg = checkpoint.get('research_config', {}) if isinstance(checkpoint, dict) else {}
+            data_cfg = cfg.get('data', {}) if isinstance(cfg, dict) else {}
+
+            # Prefer saved hyperparameters; fall back to defaults
+            input_dim_ckpt = model_cfg.get('input_dim') or data_cfg.get('input_dim') or len(data_cfg.get('feature_cols', [])) or input_dim
+            hidden_dim_ckpt = model_cfg.get('hidden_dim') or research_cfg.get('hidden_dim') or 128
+            num_layers_ckpt = model_cfg.get('num_layers') or research_cfg.get('num_layers') or 2
+            dropout_ckpt = model_cfg.get('dropout', 0.2)
+            base_model_ckpt = model_cfg.get('base_model', 'lstm')
+
+            # Infer dimensions from state_dict if mismatch (handles research-mode checkpoints)
+            state_dict = checkpoint.get('model_state_dict', {})
+            try:
+                ih_keys = [k for k in state_dict.keys() if 'weight_ih_l0' in k]
+                if ih_keys:
+                    ih0 = state_dict[ih_keys[0]]
+                    gates = ih0.shape[0] // ih0.shape[1]  # rough; adjust below
+                    input_dim_ckpt = ih0.shape[1]
+                    # Determine gate factor (LSTM=4, GRU=3)
+                    gate_factor = 4 if 'lstm' in ih_keys[0] else 3
+                    hidden_dim_ckpt = ih0.shape[0] // gate_factor
+                    # Count layers
+                    layer_ids = set()
+                    for k in state_dict:
+                        if 'weight_ih_l' in k:
+                            try:
+                                layer_ids.add(int(k.split('weight_ih_l')[-1]))
+                            except ValueError:
+                                pass
+                    if layer_ids:
+                        num_layers_ckpt = max(layer_ids) + 1
+            except Exception:
+                pass
+
+            # Instantiate model based on architecture with checkpoint hyperparams
+            model = self._instantiate_model(
+                model_info,
+                input_dim=input_dim_ckpt,
+                hidden_dim=hidden_dim_ckpt,
+                num_layers=num_layers_ckpt,
+                dropout=dropout_ckpt,
+                base_model=base_model_ckpt,
+            )
 
             if model is None:
                 return None
@@ -310,7 +554,11 @@ class ModelRegistry:
     def _instantiate_model(
         self,
         model_info: ModelInfo,
-        input_dim: int
+        input_dim: int,
+        hidden_dim: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+        base_model: str = 'lstm',
     ) -> Optional[nn.Module]:
         """
         Instantiate a model based on its architecture
@@ -330,30 +578,30 @@ class ModelRegistry:
                 from .baseline import LSTMModel
                 return LSTMModel(
                     input_dim=input_dim,
-                    hidden_dim=128,
-                    num_layers=2,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
                     output_dim=1,
-                    dropout=0.2
+                    dropout=dropout
                 )
 
             elif architecture == 'GRU':
                 from .baseline import GRUModel
                 return GRUModel(
                     input_dim=input_dim,
-                    hidden_dim=128,
-                    num_layers=2,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
                     output_dim=1,
-                    dropout=0.2
+                    dropout=dropout
                 )
 
             elif architecture == 'BiLSTM':
                 from .baseline import LSTMModel
                 return LSTMModel(
                     input_dim=input_dim,
-                    hidden_dim=128,
-                    num_layers=2,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
                     output_dim=1,
-                    dropout=0.2,
+                    dropout=dropout,
                     bidirectional=True
                 )
 
@@ -362,31 +610,31 @@ class ModelRegistry:
                 # Attention LSTM uses same base with attention layer
                 return LSTMModel(
                     input_dim=input_dim,
-                    hidden_dim=128,
-                    num_layers=2,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
                     output_dim=1,
-                    dropout=0.2
+                    dropout=dropout
                 )
 
             elif architecture == 'Transformer':
-                from .baseline import TransformerModel
+                from .transformer import TransformerModel
                 return TransformerModel(
                     input_dim=input_dim,
-                    d_model=64,
+                    d_model=hidden_dim,
                     nhead=4,
-                    num_layers=2,
-                    dropout=0.2
+                    num_encoder_layers=num_layers,
+                    dropout=dropout
                 )
 
             elif architecture == 'PINN':
                 from .pinn import PINNModel
                 return PINNModel(
                     input_dim=input_dim,
-                    hidden_dim=128,
-                    num_layers=2,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
                     output_dim=1,
-                    dropout=0.2,
-                    base_model='lstm',
+                    dropout=dropout,
+                    base_model=base_model,
                     lambda_gbm=physics.get('lambda_gbm', 0.1),
                     lambda_bs=physics.get('lambda_bs', 0.0),
                     lambda_ou=physics.get('lambda_ou', 0.1),
@@ -397,12 +645,12 @@ class ModelRegistry:
                 from .stacked_pinn import StackedPINN
                 return StackedPINN(
                     input_dim=input_dim,
-                    physics_hidden=64,
-                    lstm_hidden=128,
-                    gru_hidden=128,
-                    num_layers=2,
-                    output_dim=1,
-                    dropout=0.2,
+                    encoder_dim=hidden_dim,
+                    lstm_hidden_dim=hidden_dim,
+                    num_encoder_layers=num_layers,
+                    num_rnn_layers=num_layers,
+                    prediction_hidden_dim=max(hidden_dim // 2, 32),
+                    dropout=dropout,
                     lambda_gbm=physics.get('lambda_gbm', 0.1),
                     lambda_ou=physics.get('lambda_ou', 0.1)
                 )
@@ -411,13 +659,98 @@ class ModelRegistry:
                 from .stacked_pinn import ResidualPINN
                 return ResidualPINN(
                     input_dim=input_dim,
-                    hidden_dim=128,
-                    num_layers=2,
-                    output_dim=1,
-                    dropout=0.2,
-                    base_model='lstm',
+                    base_model_type=base_model,
+                    base_hidden_dim=hidden_dim,
+                    correction_hidden_dim=max(hidden_dim // 2, 32),
+                    num_base_layers=num_layers,
+                    num_correction_layers=num_layers,
+                    dropout=dropout,
                     lambda_gbm=physics.get('lambda_gbm', 0.1),
                     lambda_ou=physics.get('lambda_ou', 0.1)
+                )
+
+            elif architecture == 'SpectralRegimePINN':
+                from .spectral_pinn import SpectralRegimePINN
+                return SpectralRegimePINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    n_regimes=3,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_autocorr=physics.get('lambda_autocorr', 0.05),
+                    lambda_spectral=physics.get('lambda_spectral', 0.05)
+                )
+
+            # ========== VOLATILITY FORECASTING ARCHITECTURES ==========
+            elif architecture == 'VolatilityLSTM':
+                from .volatility import VolatilityLSTM
+                return VolatilityLSTM(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout
+                )
+
+            elif architecture == 'VolatilityGRU':
+                from .volatility import VolatilityGRU
+                return VolatilityGRU(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout
+                )
+
+            elif architecture == 'VolatilityTransformer':
+                from .volatility import VolatilityTransformer
+                return VolatilityTransformer(
+                    input_dim=input_dim,
+                    d_model=hidden_dim,
+                    nhead=4,
+                    num_layers=num_layers,
+                    dropout=dropout
+                )
+
+            elif architecture == 'VolatilityPINN':
+                from .volatility import VolatilityPINN
+                return VolatilityPINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    base_model='lstm',
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_garch=physics.get('lambda_garch', 0.1),
+                    lambda_feller=physics.get('lambda_feller', 0.05),
+                    lambda_leverage=physics.get('lambda_leverage', 0.05)
+                )
+
+            elif architecture == 'HestonPINN':
+                from .volatility import HestonPINN
+                return HestonPINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    lambda_heston=physics.get('lambda_heston', 0.1),
+                    lambda_feller=physics.get('lambda_feller', 0.05),
+                    lambda_leverage=physics.get('lambda_leverage', 0.05)
+                )
+
+            elif architecture == 'StackedVolatilityPINN':
+                from .volatility import StackedVolatilityPINN
+                return StackedVolatilityPINN(
+                    input_dim=input_dim,
+                    encoder_dim=hidden_dim // 2,
+                    rnn_hidden_dim=hidden_dim,
+                    num_encoder_layers=num_layers,
+                    num_rnn_layers=num_layers,
+                    dropout=dropout,
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_garch=physics.get('lambda_garch', 0.1),
+                    lambda_feller=physics.get('lambda_feller', 0.05),
+                    lambda_leverage=physics.get('lambda_leverage', 0.05)
                 )
 
             else:
@@ -437,6 +770,227 @@ class ModelRegistry:
         """
         return [k for k, v in self.models.items() if v.trained]
 
+    def create_model(
+        self,
+        model_type: str,
+        input_dim: int,
+        hidden_dim: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+        output_dim: int = 1,
+    ) -> Optional[nn.Module]:
+        """
+        Create a fresh model instance for training.
+
+        Args:
+            model_type: The model key (e.g., 'lstm', 'pinn_gbm', 'transformer')
+            input_dim: Input feature dimension
+            hidden_dim: Hidden layer dimension
+            num_layers: Number of layers
+            dropout: Dropout rate
+            output_dim: Output dimension
+
+        Returns:
+            Fresh model instance ready for training
+        """
+        model_info = self.get_model_info(model_type)
+
+        if model_info is None:
+            logger.error(f"Model type '{model_type}' not found in registry")
+            return None
+
+        architecture = model_info.architecture
+        physics = model_info.physics_constraints or {}
+
+        try:
+            if architecture == 'LSTM':
+                from .baseline import LSTMModel
+                return LSTMModel(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    output_dim=output_dim,
+                    dropout=dropout
+                )
+
+            elif architecture == 'GRU':
+                from .baseline import GRUModel
+                return GRUModel(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    output_dim=output_dim,
+                    dropout=dropout
+                )
+
+            elif architecture == 'BiLSTM':
+                from .baseline import LSTMModel
+                return LSTMModel(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    output_dim=output_dim,
+                    dropout=dropout,
+                    bidirectional=True
+                )
+
+            elif architecture == 'AttentionLSTM':
+                from .baseline import LSTMModel
+                return LSTMModel(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    output_dim=output_dim,
+                    dropout=dropout
+                )
+
+            elif architecture == 'Transformer':
+                from .transformer import TransformerModel
+                return TransformerModel(
+                    input_dim=input_dim,
+                    d_model=hidden_dim // 2,  # Transformer uses smaller d_model
+                    nhead=4,
+                    num_encoder_layers=num_layers,
+                    dropout=dropout
+                )
+
+            elif architecture == 'PINN':
+                from .pinn import PINNModel
+                return PINNModel(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    output_dim=output_dim,
+                    dropout=dropout,
+                    base_model='lstm',
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.0),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_langevin=physics.get('lambda_langevin', 0.0)
+                )
+
+            elif architecture == 'StackedPINN':
+                from .stacked_pinn import StackedPINN
+                return StackedPINN(
+                    input_dim=input_dim,
+                    encoder_dim=hidden_dim,
+                    lstm_hidden_dim=hidden_dim,
+                    num_encoder_layers=num_layers,
+                    num_rnn_layers=num_layers,
+                    prediction_hidden_dim=hidden_dim // 2,
+                    dropout=dropout,
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1)
+                )
+
+            elif architecture == 'ResidualPINN':
+                from .stacked_pinn import ResidualPINN
+                return ResidualPINN(
+                    input_dim=input_dim,
+                    base_model_type='lstm',
+                    base_hidden_dim=hidden_dim,
+                    correction_hidden_dim=hidden_dim // 2,
+                    num_base_layers=num_layers,
+                    num_correction_layers=num_layers,
+                    dropout=dropout,
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1)
+                )
+
+            elif architecture == 'SpectralRegimePINN':
+                from .spectral_pinn import SpectralRegimePINN
+                return SpectralRegimePINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    n_regimes=3,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_autocorr=physics.get('lambda_autocorr', 0.05),
+                    lambda_spectral=physics.get('lambda_spectral', 0.05)
+                )
+
+            # ========== VOLATILITY FORECASTING ARCHITECTURES ==========
+            elif architecture == 'VolatilityLSTM':
+                from .volatility import VolatilityLSTM
+                return VolatilityLSTM(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout
+                )
+
+            elif architecture == 'VolatilityGRU':
+                from .volatility import VolatilityGRU
+                return VolatilityGRU(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout
+                )
+
+            elif architecture == 'VolatilityTransformer':
+                from .volatility import VolatilityTransformer
+                return VolatilityTransformer(
+                    input_dim=input_dim,
+                    d_model=hidden_dim,
+                    nhead=4,
+                    num_layers=num_layers,
+                    dropout=dropout
+                )
+
+            elif architecture == 'VolatilityPINN':
+                from .volatility import VolatilityPINN
+                return VolatilityPINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    base_model='lstm',
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_garch=physics.get('lambda_garch', 0.1),
+                    lambda_feller=physics.get('lambda_feller', 0.05),
+                    lambda_leverage=physics.get('lambda_leverage', 0.05)
+                )
+
+            elif architecture == 'HestonPINN':
+                from .volatility import HestonPINN
+                return HestonPINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    lambda_heston=physics.get('lambda_heston', 0.1),
+                    lambda_feller=physics.get('lambda_feller', 0.05),
+                    lambda_leverage=physics.get('lambda_leverage', 0.05)
+                )
+
+            elif architecture == 'StackedVolatilityPINN':
+                from .volatility import StackedVolatilityPINN
+                return StackedVolatilityPINN(
+                    input_dim=input_dim,
+                    encoder_dim=hidden_dim // 2,
+                    rnn_hidden_dim=hidden_dim,
+                    num_encoder_layers=num_layers,
+                    num_rnn_layers=num_layers,
+                    dropout=dropout,
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_garch=physics.get('lambda_garch', 0.1),
+                    lambda_feller=physics.get('lambda_feller', 0.05),
+                    lambda_leverage=physics.get('lambda_leverage', 0.05)
+                )
+
+            else:
+                logger.error(f"Unknown architecture: {architecture}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to create model '{model_type}': {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def refresh_status(self):
         """Refresh training status for all models"""
         self._update_training_status(self.models)
@@ -448,7 +1002,7 @@ class ModelRegistry:
         untrained = total - trained
 
         by_type = {}
-        for model_type in ['baseline', 'pinn', 'advanced']:
+        for model_type in ['baseline', 'pinn', 'advanced', 'volatility']:
             type_models = self.get_models_by_type(model_type)
             by_type[model_type] = {
                 'total': len(type_models),
@@ -493,4 +1047,29 @@ class ModelRegistry:
 
 def get_model_registry(project_root: Path) -> ModelRegistry:
     """Get the model registry instance"""
+    return ModelRegistry(project_root)
+
+
+def clear_checkpoint_cache():
+    """Clear the checkpoint cache to force a rescan."""
+    global _checkpoint_cache, _cache_timestamp
+    _checkpoint_cache = {}
+    _cache_timestamp = 0
+    logger.debug("Checkpoint cache cleared")
+
+
+# Streamlit-compatible cached registry getter
+# This function can be decorated with @st.cache_resource when imported in Streamlit apps
+def get_cached_model_registry(project_root: Path) -> ModelRegistry:
+    """
+    Get a cached model registry instance.
+
+    When used with Streamlit's @st.cache_resource decorator, this prevents
+    repeated filesystem scans on every page interaction.
+
+    Usage in Streamlit apps:
+        @st.cache_resource
+        def get_registry():
+            return get_cached_model_registry(config.project_root)
+    """
     return ModelRegistry(project_root)
