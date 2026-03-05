@@ -29,6 +29,7 @@
 40. [Baseline PINN Registry Fix & Returns-First Training Alignment](#40-baseline-pinn-registry-fix--returns-first-training-alignment-2026-03-05)
 41. [Google Colab Training Notebook](#41-google-colab-training-notebook-2026-03-05)
 42. [Colab Notebook Metrics & Data Prep Updates](#42-colab-notebook-metrics--data-prep-updates-2026-03-05)
+43. [Colab S&P 500 Data & Metrics Audit](#43-colab-sp-500-data--metrics-audit-2026-03-05)
 
 ---
 
@@ -6271,3 +6272,26 @@ Refined the Colab training notebook to align with the research-grade Python pipe
 |------|---------|
 | `Jupyter/Colab_All_Models.ipynb` | Updated data prep, metrics, training summaries, and plotting for research-aligned Colab runs |
 | `DOCUMENT.md` | Added entry documenting the Colab notebook metric/data prep updates |
+
+## 43. Colab S&P 500 Data & Metrics Audit (2026-03-05)
+
+### Overview
+Enforced the Colab training notebook to pull only S&P 500 (^GSPC) data from the latest 10-year window, validated DP-PINN metrics serialization, and added a metrics/artifact audit to guarantee every model family outputs research-grade summaries and plots.
+
+### Changes Made
+1. **File**: `Jupyter/Colab_All_Models.ipynb`
+   - Locked price and volatility data pulls to `^GSPC` with a dynamic 10-year range via `get_dynamic_date_range`, and hard-failed if the index data is missing.
+   - Ensured dual-phase PINN metrics include mean error and corrected the DP summary print string for valid JSON serialization.
+   - Added a metrics coverage audit cell that verifies required metrics per model type, checks all plot/CSV artifacts exist, and writes `results/colab_runs/metrics_audit.json`.
+2. **File**: `DOCUMENT.md`
+   - Documented the S&P 500 data enforcement and metrics audit additions.
+
+### Verification
+- Open `Jupyter/Colab_All_Models.ipynb` in Colab, run cells through the new “Metrics Coverage Audit” step, and confirm the console reports `OK` for price, volatility, and DP models.
+- Verify the following artifacts are created in `results/colab_runs/`: `metrics_audit.json`, `price_model_summary.csv`, `volatility_model_summary.csv`, `dp_pinn_summary.csv`, and the PNG comparison plots.
+
+### Files Modified
+| File | Changes |
+|------|---------|
+| `Jupyter/Colab_All_Models.ipynb` | Enforced ^GSPC 10-year data, fixed DP summary serialization, added metrics/audit cell |
+| `DOCUMENT.md` | Added entry describing S&P 500 data enforcement and audit |
