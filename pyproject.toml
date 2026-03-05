@@ -1,0 +1,42 @@
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+skip-string-normalization = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "backend", "scripts", "tests"]
+extend-exclude = [
+    "venv",
+    "data",
+    "logs",
+    "outputs",
+    "Models",
+]
+select = [
+    "E",  # pycodestyle
+    "F",  # pyflakes
+    "W",  # warnings
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "UP", # pyupgrade
+    "N",  # pep8-naming
+]
+ignore = [
+    "E501",  # handled by black
+]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_configs = true
+check_untyped_defs = true
+allow_redefinition = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src:backend"
+

@@ -1,0 +1,15 @@
+\begin{table}[htbp]
+\caption{Statistical Comparison: PINN Global vs LSTM}
+\label{tab:pinn_lstm_comparison}
+\begin{tabular}{lccccccccc}
+\toprule
+metric & pinn_global & lstm & difference & improvement_% & winner & t_pvalue & wilcoxon_pvalue & cohens_d & significant \\
+\midrule
+rmse & 0.8556 & 1.0480 & -0.1924 & 18.3566 & pinn_global & 0.0000 & 0.0000 & -1.9173 & ✓ \\
+mae & 0.3550 & 0.4764 & -0.1214 & 25.4774 & pinn_global & 0.0000 & 0.0000 & -2.8551 & ✓ \\
+mape & 6.9915 & 10.0961 & -3.1046 & 30.7505 & pinn_global & 0.0000 & 0.0000 & -3.2778 & ✓ \\
+r2_score & 0.8679 & 0.8018 & 0.0661 & 8.2404 & pinn_global & 0.0005 & 0.0019 & 0.6767 & ✓ \\
+directional_accuracy & 0.5098 & 51.3988 & -50.8891 & -99.0082 & lstm & 0.0000 & 0.0000 & -14.9139 & ✓ \\
+\bottomrule
+\end{tabular}
+\end{table}

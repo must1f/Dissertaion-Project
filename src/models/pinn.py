@@ -15,6 +15,14 @@ import math
 
 from ..utils.logger import get_logger
 from .baseline import LSTMModel
+from ..constants import (
+    DEFAULT_LAMBDA_GBM,
+    DEFAULT_LAMBDA_OU,
+    DEFAULT_LAMBDA_BS,
+    DEFAULT_LAMBDA_LANGEVIN,
+    RISK_FREE_RATE,
+    DAILY_TIME_STEP,
+)
 
 logger = get_logger(__name__)
 
@@ -26,12 +34,12 @@ class PhysicsLoss(nn.Module):
 
     def __init__(
         self,
-        lambda_gbm: float = 0.1,
-        lambda_bs: float = 0.1,
-        lambda_ou: float = 0.1,
-        lambda_langevin: float = 0.1,
-        risk_free_rate: float = 0.02,  # 2% annual risk-free rate
-        dt: float = 1.0 / 252.0,  # Time step in years (1 trading day)
+        lambda_gbm: float = DEFAULT_LAMBDA_GBM,
+        lambda_bs: float = DEFAULT_LAMBDA_BS,
+        lambda_ou: float = DEFAULT_LAMBDA_OU,
+        lambda_langevin: float = DEFAULT_LAMBDA_LANGEVIN,
+        risk_free_rate: float = RISK_FREE_RATE,
+        dt: float = DAILY_TIME_STEP,
         # Learnable physics parameters (initial values)
         theta_init: float = 1.0,      # OU mean reversion speed
         gamma_init: float = 0.5,      # Langevin friction coefficient
@@ -207,6 +215,9 @@ class PhysicsLoss(nn.Module):
 
         # Forward pass through model
         V = model(x_grad)
+        # Handle models that return tuple (output, hidden_state)
+        if isinstance(V, tuple):
+            V = V[0]
         if len(V.shape) == 1:
             V = V.unsqueeze(-1)
 

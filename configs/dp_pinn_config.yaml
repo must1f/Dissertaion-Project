@@ -1,0 +1,170 @@
+# Dual-Phase PINN Configuration for Burgers' Equation
+#
+# Problem: u_t + u * u_x = ν * u_xx
+# Domain: x ∈ [-1, 1], t ∈ [0, 1]
+# IC: u(x, 0) = -sin(πx)
+# BC: u(-1, t) = u(1, t) = 0
+
+# =============================================================================
+# PROBLEM PARAMETERS
+# =============================================================================
+problem:
+  # Burgers' equation viscosity (ν = 0.01/π ≈ 0.00318)
+  # Smaller viscosity = steeper gradients (more challenging)
+  viscosity: 0.003183098861837907
+
+  # Spatial domain
+  x_min: -1.0
+  x_max: 1.0
+
+  # Temporal domain
+  t_min: 0.0
+  t_max: 1.0
+
+# =============================================================================
+# MODEL ARCHITECTURE
+# =============================================================================
+model:
+  # Network architecture (shared between standard and dual-phase)
+  num_layers: 8          # Number of hidden layers
+  hidden_dim: 50         # Neurons per hidden layer
+  activation: tanh       # Activation function: tanh, sin, gelu
+
+  # Loss weights
+  lambda_pde: 1.0        # PDE residual weight
+  lambda_ic: 100.0       # Initial condition weight
+  lambda_bc: 100.0       # Boundary condition weight
+
+# =============================================================================
+# DUAL-PHASE CONFIGURATION
+# =============================================================================
+dual_phase:
+  # Phase transition time
+  t_switch: 0.4
+
+  # Weight for intermediate constraint at t_switch
+  # High weight ensures continuity between phases
+  lambda_intermediate: 100.0
+
+# =============================================================================
+# TRAINING PARAMETERS
+# =============================================================================
+training:
+  # Adam optimizer (first phase of training)
+  adam:
+    learning_rate: 0.001
+    iterations: 50000
+    beta1: 0.9
+    beta2: 0.999
+
+  # L-BFGS optimizer (second phase of training)
+  lbfgs:
+    learning_rate: 1.0
+    iterations: 10000
+    max_iter_per_step: 50
+    history_size: 50
+
+  # Gradient clipping for stability
+  gradient_clip_norm: 1.0
+
+  # Learning rate scheduler
+  scheduler:
+    patience: 1000       # Iterations before reducing LR
+    factor: 0.5          # LR reduction factor
+    min_lr: 0.000001
+
+  # Logging intervals
+  log_interval: 100      # Print loss every N iterations
+  eval_interval: 1000    # Evaluate L2 error every N iterations
+
+  # Device
+  device: cuda           # cuda, cpu, or mps
+
+# =============================================================================
+# DATA GENERATION
+# =============================================================================
+data:
+  # Number of collocation points (LHS)
+  n_collocation: 20000
+
+  # Number of boundary condition points
+  n_boundary: 2000
+
+  # Number of initial condition points
+  n_initial: 2000
+
+  # Number of intermediate constraint points (for dual-phase)
+  n_intermediate: 1000
+
+  # Random seed for reproducibility
+  seed: 42
+
+# =============================================================================
+# EVALUATION
+# =============================================================================
+evaluation:
+  # Evaluation grid resolution
+  n_x: 256               # Spatial points
+  n_t: 100               # Temporal points
+
+  # Time points for slice visualization
+  time_slices:
+    - 0.0
+    - 0.1
+    - 0.25
+    - 0.4
+    - 0.5
+    - 0.7
+    - 0.9
+    - 1.0
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+output:
+  # Base directory for results
+  base_dir: results/dp_pinn
+
+  # Subdirectories
+  checkpoints_dir: checkpoints
+  plots_dir: plots
+  logs_dir: logs
+
+  # Output formats
+  plot_format: pdf       # pdf, png, svg
+  checkpoint_format: pt  # PyTorch checkpoint
+
+# =============================================================================
+# EXPERIMENT SETTINGS
+# =============================================================================
+experiment:
+  # Experiment name
+  name: burgers_dp_pinn
+
+  # Random seed
+  seed: 42
+
+  # Models to train
+  models:
+    - standard_pinn
+    - dual_phase_pinn
+
+  # Number of runs for statistical robustness
+  n_runs: 1
+
+  # Save intermediate checkpoints
+  save_checkpoints: true
+  checkpoint_interval: 10000  # Save every N iterations
+
+# =============================================================================
+# EXPECTED RESULTS (Reference)
+# =============================================================================
+expected_results:
+  # Expected L2 errors (approximate)
+  standard_pinn:
+    relative_l2_error: 0.01  # ~1e-2 to 1e-1
+    notes: "Error increases with time due to stiffness"
+
+  dual_phase_pinn:
+    relative_l2_error: 0.001  # ~1e-3 to 1e-2
+    notes: "Better steep-gradient capture via phase splitting"

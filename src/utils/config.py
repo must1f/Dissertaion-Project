@@ -3,10 +3,23 @@ Configuration management using Pydantic for validation and type safety.
 """
 
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Literal
-from pydantic import BaseModel, Field, validator
+from typing import Optional, Literal, Dict, Any
+from pydantic import BaseModel, Field, field_validator, ConfigDict, model_validator
 from dotenv import load_dotenv
+
+
+def get_dynamic_date_range(years: int = 10) -> tuple[str, str]:
+    """
+    Calculate dynamic date range for the last N years of data.
+
+    Returns:
+        tuple: (start_date, end_date) as ISO format strings
+    """
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=years * 365)
+    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 # Load environment variables
 load_dotenv()
@@ -26,12 +39,13 @@ class DatabaseConfig(BaseModel):
 
 
 class APIConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     """API configuration for data sources"""
     alpha_vantage_key: Optional[str] = Field(
         default_factory=lambda: os.getenv("ALPHA_VANTAGE_API_KEY")
     )
 
-    @validator("alpha_vantage_key")
+    @field_validator("alpha_vantage_key")
     def validate_alpha_vantage(cls, v):
         if v and v == "your_alpha_vantage_key_here":
             return None
@@ -39,9 +53,14 @@ class APIConfig(BaseModel):
 
 
 class DataConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     """Data processing configuration"""
-    start_date: str = Field(default_factory=lambda: os.getenv("START_DATE", "2014-01-01"))
-    end_date: str = Field(default_factory=lambda: os.getenv("END_DATE", "2024-01-01"))
+    start_date: str = Field(
+        default_factory=lambda: os.getenv("START_DATE") or get_dynamic_date_range(10)[0]
+    )
+    end_date: str = Field(
+        default_factory=lambda: os.getenv("END_DATE") or get_dynamic_date_range(10)[1]
+    )
     train_ratio: float = Field(default_factory=lambda: float(os.getenv("TRAIN_RATIO", "0.7")))
     val_ratio: float = Field(default_factory=lambda: float(os.getenv("VAL_RATIO", "0.15")))
     test_ratio: float = Field(default_factory=lambda: float(os.getenv("TEST_RATIO", "0.15")))
@@ -58,17 +77,31 @@ class DataConfig(BaseModel):
         'CMCSA', 'PM', 'BMY', 'INTC', 'QCOM', 'UPS', 'HON', 'MS', 'RTX', 'AMGN'
     ])
 
-    @validator("train_ratio", "val_ratio", "test_ratio")
+    @field_validator("train_ratio", "val_ratio", "test_ratio")
     def validate_ratio(cls, v):
         if not 0 < v < 1:
             raise ValueError("Ratio must be between 0 and 1")
         return v
 
+    @model_validator(mode="after")
+    def validate_splits(self):
+        total = self.train_ratio + self.val_ratio + self.test_ratio
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"train+val+test ratios must sum to 1.0 (got {total:.4f})")
+        # ensure date order
+        try:
+            if datetime.fromisoformat(self.end_date) < datetime.fromisoformat(self.start_date):
+                raise ValueError("end_date must be after start_date")
+        except ValueError:
+            # datetime parsing errors will surface with clearer context
+            raise
+        return self
+
 
 class ModelConfig(BaseModel):
     """Model architecture configuration"""
     hidden_dim: int = 128
-    num_layers: int = 3
+    num_layers: int = 2  # Matches actual model instantiation in model_registry.py
     dropout: float = 0.2
     bidirectional: bool = True
 
@@ -105,6 +138,113 @@ class TrainingConfig(BaseModel):
     random_seed: int = Field(default_factory=lambda: int(os.getenv("RANDOM_SEED", "42")))
 
 
+class ResearchConfig(BaseModel):
+    """
+    Research-compliant training configuration for fair model comparison.
+
+    All parameters are locked to ensure reproducible and comparable results
+    across different model architectures. This follows research best practices
+    for ablation studies and model comparisons.
+    """
+    # LOCKED TRAINING PARAMETERS - Same for all models
+    epochs: int = Field(default=100, description="Fixed number of epochs for all models")
+    batch_size: int = Field(default=16, description="Small batch size for better gradient estimates")
+    learning_rate: float = Field(default=0.0005, description="Lower LR for stability with deep models")
+
+    # Early stopping disabled for research mode - all models train for full epochs
+    use_early_stopping: bool = Field(default=False, description="Disable early stopping for fair comparison")
+
+    # Regularization - CRITICAL for preventing overfitting
+    weight_decay: float = Field(default=1e-4, description="L2 regularization weight decay")
+
+    # Learning rate scheduler parameters (same for all)
+    scheduler_patience: int = Field(default=10, description="LR scheduler patience (more patience for research)")
+    scheduler_factor: float = Field(default=0.5, description="LR scheduler reduction factor")
+
+    # Gradient clipping (same for all)
+    gradient_clip_norm: float = Field(default=1.0, description="Gradient clipping norm")
+
+    # Reproducibility
+    random_seed: int = Field(default=42, description="Random seed for reproducibility")
+
+    # Data split ratios (same for all)
+    train_ratio: float = Field(default=0.7, description="Training set ratio")
+    val_ratio: float = Field(default=0.15, description="Validation set ratio")
+    test_ratio: float = Field(default=0.15, description="Test set ratio")
+
+    # Sequence parameters (same for all)
+    sequence_length: int = Field(default=180, description="6 months lookback for research-grade training")
+    forecast_horizon: int = Field(default=1, description="Prediction horizon")
+
+    # Model architecture (same for all) - deep models for complex patterns
+    hidden_dim: int = Field(default=512, description="Deep hidden dimension for 10-year data")
+    num_layers: int = Field(default=4, description="4 layers for hierarchical features")
+    dropout: float = Field(default=0.15, description="Moderate dropout for deep models")
+
+    # Financial metrics parameters (same for all)
+    transaction_cost: float = Field(default=0.003, description="Transaction cost (0.3%)")
+    risk_free_rate: float = Field(default=0.02, description="Annual risk-free rate (2%)")
+    periods_per_year: int = Field(default=252, description="Trading days per year")
+
+    def get_training_params(self) -> Dict:
+        """Get locked training parameters as dictionary."""
+        return {
+            'epochs': self.epochs,
+            'batch_size': self.batch_size,
+            'learning_rate': self.learning_rate,
+            'weight_decay': self.weight_decay,
+            'use_early_stopping': self.use_early_stopping,
+            'scheduler_patience': self.scheduler_patience,
+            'scheduler_factor': self.scheduler_factor,
+            'gradient_clip_norm': self.gradient_clip_norm,
+            'random_seed': self.random_seed,
+        }
+
+    def get_data_params(self) -> Dict:
+        """Get locked data parameters as dictionary."""
+        return {
+            'train_ratio': self.train_ratio,
+            'val_ratio': self.val_ratio,
+            'test_ratio': self.test_ratio,
+            'sequence_length': self.sequence_length,
+            'forecast_horizon': self.forecast_horizon,
+        }
+
+    def get_model_params(self) -> Dict:
+        """Get locked model architecture parameters."""
+        return {
+            'hidden_dim': self.hidden_dim,
+            'num_layers': self.num_layers,
+            'dropout': self.dropout,
+        }
+
+    def get_financial_params(self) -> Dict:
+        """Get locked financial evaluation parameters."""
+        return {
+            'transaction_cost': self.transaction_cost,
+            'risk_free_rate': self.risk_free_rate,
+            'periods_per_year': self.periods_per_year,
+        }
+
+
+# Global research config instance
+_research_config: Optional[ResearchConfig] = None
+
+
+def get_research_config() -> ResearchConfig:
+    """Get global research configuration instance (singleton pattern)"""
+    global _research_config
+    if _research_config is None:
+        _research_config = ResearchConfig()
+    return _research_config
+
+
+def reset_research_config():
+    """Reset research configuration (useful for testing)"""
+    global _research_config
+    _research_config = None
+
+
 class TradingConfig(BaseModel):
     """Trading agent configuration"""
     initial_capital: float = Field(
@@ -126,6 +266,7 @@ class TradingConfig(BaseModel):
 
 class Config(BaseModel):
     """Main configuration object"""
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     data: DataConfig = Field(default_factory=DataConfig)
@@ -139,11 +280,7 @@ class Config(BaseModel):
     checkpoint_dir: Path = Field(default_factory=lambda: Path(__file__).parent.parent.parent / "checkpoints")
     log_dir: Path = Field(default_factory=lambda: Path(__file__).parent.parent.parent / "logs")
 
-    class Config:
-        arbitrary_types_allowed = True
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def model_post_init(self, __context: Any) -> None:
         # Create directories if they don't exist
         self.data_dir.mkdir(exist_ok=True)
         self.checkpoint_dir.mkdir(exist_ok=True)

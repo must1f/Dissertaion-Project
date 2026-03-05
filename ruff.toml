@@ -1,0 +1,8 @@
+# Ruff configuration is mirrored in pyproject.toml for tool compatibility.
+# Keep both files in sync when updating lint rules.
+line-length = 100
+target-version = "py310"
+src = ["src", "backend", "scripts", "tests"]
+extend-exclude = ["venv", "data", "logs", "outputs", "Models"]
+select = ["E", "F", "W", "I", "B", "UP", "N"]
+ignore = ["E501"]

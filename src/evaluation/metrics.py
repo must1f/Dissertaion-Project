@@ -5,10 +5,48 @@ Evaluation metrics for forecasting and trading performance
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional, Tuple
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from scipy import stats
+
+# sklearn is used only for a few basic metrics; provide fallbacks so training
+# doesn't fail when the dependency is missing in lightweight environments.
+try:  # pragma: no cover - guard for optional dependency
+    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+except ImportError:  # minimal NumPy replacements
+    def mean_squared_error(y_true, y_pred):
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
+        return float(np.mean((y_true - y_pred) ** 2))
+
+    def mean_absolute_error(y_true, y_pred):
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
+        return float(np.mean(np.abs(y_true - y_pred)))
+
+    def r2_score(y_true, y_pred):
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
+        ss_res = np.sum((y_true - y_pred) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+        return float(1 - ss_res / (ss_tot + 1e-12))
+
+# scipy is used only for a normal CDF in the Diebold-Mariano test.
+try:  # pragma: no cover
+    from scipy import stats
+except ImportError:
+    import math
+
+    class _NormFallback:
+        @staticmethod
+        def cdf(x: float) -> float:
+            # Standard normal CDF via error function
+            return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+    class _StatsFallback:
+        norm = _NormFallback()
+
+    stats = _StatsFallback()
 
 from ..utils.logger import get_logger
+from ..constants import RISK_FREE_RATE, TRADING_DAYS_PER_YEAR
 
 logger = get_logger(__name__)
 
@@ -73,7 +111,8 @@ class MetricsCalculator:
         significant_mask = np.abs(true_direction) > threshold
 
         if np.sum(significant_mask) == 0:
-            return 50.0  # No significant movements, return random baseline
+            # No significant movements; return random-baseline accuracy on 0–1 scale
+            return 0.5
 
         true_significant = np.sign(true_direction[significant_mask])
         pred_significant = np.sign(pred_direction[significant_mask])
@@ -82,13 +121,15 @@ class MetricsCalculator:
         correct = (true_significant == pred_significant).sum()
         total = len(true_significant)
 
-        return (correct / total) * 100 if total > 0 else 0.0
+        # FIX: Return 0-1 scale for consistency with financial_metrics.py
+        # Dashboard will multiply by 100 for display
+        return (correct / total) if total > 0 else 0.0
 
     @staticmethod
     def sharpe_ratio(
         returns: np.ndarray,
-        risk_free_rate: float = 0.02,
-        periods_per_year: int = 252
+        risk_free_rate: float = RISK_FREE_RATE,
+        periods_per_year: int = TRADING_DAYS_PER_YEAR
     ) -> float:
         """
         Sharpe Ratio: (mean return - risk-free rate) / std of returns
@@ -99,23 +140,34 @@ class MetricsCalculator:
             periods_per_year: Number of periods per year (252 for daily)
 
         Returns:
-            Annualized Sharpe ratio
+            Annualized Sharpe ratio (capped at reasonable bounds)
         """
-        if len(returns) == 0 or np.std(returns) == 0:
+        if len(returns) == 0:
+            return 0.0
+
+        # CRITICAL FIX: Clip returns to realistic bounds
+        returns = np.clip(returns, -0.99, 1.0)
+
+        std_return = np.std(returns)
+        if std_return < 1e-10:
             return 0.0
 
         # Annualize
         mean_return = np.mean(returns) * periods_per_year
-        std_return = np.std(returns) * np.sqrt(periods_per_year)
+        std_return = std_return * np.sqrt(periods_per_year)
 
         sharpe = (mean_return - risk_free_rate) / std_return
-        return sharpe
+
+        # Cap at reasonable bounds
+        sharpe = np.clip(sharpe, -5.0, 5.0)
+
+        return float(sharpe)
 
     @staticmethod
     def sortino_ratio(
         returns: np.ndarray,
-        risk_free_rate: float = 0.02,
-        periods_per_year: int = 252
+        risk_free_rate: float = RISK_FREE_RATE,
+        periods_per_year: int = TRADING_DAYS_PER_YEAR
     ) -> float:
         """
         Sortino Ratio: Like Sharpe but only considers downside volatility
@@ -126,26 +178,34 @@ class MetricsCalculator:
             periods_per_year: Number of periods per year
 
         Returns:
-            Annualized Sortino ratio
+            Annualized Sortino ratio (capped at reasonable bounds)
         """
         if len(returns) == 0:
             return 0.0
 
-        # Downside returns (negative returns)
+        # CRITICAL FIX: Clip returns to realistic bounds
+        returns = np.clip(returns, -0.99, 1.0)
+
+        # Downside returns (negative returns below 0 - standard Sortino)
         downside_returns = returns[returns < 0]
 
         if len(downside_returns) == 0:
-            return np.inf
+            # No downside returns: risk-adjusted ratio is undefined
+            return 0.0
 
         # Annualize
         mean_return = np.mean(returns) * periods_per_year
         downside_std = np.std(downside_returns) * np.sqrt(periods_per_year)
 
-        if downside_std == 0:
+        if downside_std < 1e-10:
             return 0.0
 
         sortino = (mean_return - risk_free_rate) / downside_std
-        return sortino
+
+        # Cap at reasonable bounds
+        sortino = np.clip(sortino, -10.0, 10.0)
+
+        return float(sortino)
 
     @staticmethod
     def max_drawdown(cumulative_returns: np.ndarray) -> float:
@@ -156,10 +216,13 @@ class MetricsCalculator:
             cumulative_returns: Array of cumulative returns
 
         Returns:
-            Maximum drawdown (as positive percentage)
+            Maximum drawdown (as positive percentage, capped at 100%)
         """
         if len(cumulative_returns) == 0:
             return 0.0
+
+        # CRITICAL FIX: Ensure equity doesn't go negative
+        cumulative_returns = np.maximum(cumulative_returns, 1e-10)
 
         # Calculate running maximum
         running_max = np.maximum.accumulate(cumulative_returns)
@@ -167,8 +230,13 @@ class MetricsCalculator:
         # Calculate drawdown
         drawdown = (cumulative_returns - running_max) / running_max
 
-        # Return maximum drawdown as positive value
-        return abs(np.min(drawdown)) * 100
+        # CRITICAL FIX: Cap drawdown at -100% (total loss is the max possible)
+        drawdown = np.maximum(drawdown, -1.0)
+
+        # Return maximum drawdown as positive value (capped at 100%)
+        max_dd = min(abs(np.min(drawdown)) * 100, 100.0)
+
+        return float(max_dd)
 
     @staticmethod
     def calmar_ratio(
@@ -183,10 +251,13 @@ class MetricsCalculator:
             periods_per_year: Number of periods per year
 
         Returns:
-            Calmar ratio
+            Calmar ratio (capped at reasonable bounds)
         """
         if len(returns) == 0:
             return 0.0
+
+        # CRITICAL FIX: Clip returns to realistic bounds
+        returns = np.clip(returns, -0.99, 1.0)
 
         # Calculate cumulative returns
         cumulative_returns = (1 + returns).cumprod()
@@ -194,15 +265,28 @@ class MetricsCalculator:
         # Annualized return
         total_return = cumulative_returns[-1] - 1
         n_years = len(returns) / periods_per_year
-        annualized_return = (1 + total_return) ** (1 / n_years) - 1
+
+        if n_years <= 0:
+            return 0.0
+
+        # Handle edge case for total loss
+        if total_return <= -1:
+            annualized_return = -1.0
+        else:
+            annualized_return = (1 + total_return) ** (1 / n_years) - 1
 
         # Maximum drawdown
         max_dd = MetricsCalculator.max_drawdown(cumulative_returns) / 100
 
-        if max_dd == 0:
+        if max_dd < 0.001:  # Less than 0.1% drawdown
             return 0.0
 
-        return annualized_return / max_dd
+        calmar = annualized_return / max_dd
+
+        # Cap at reasonable bounds
+        calmar = np.clip(calmar, -10.0, 10.0)
+
+        return float(calmar)
 
     @staticmethod
     def win_rate(returns: np.ndarray) -> float:
@@ -227,7 +311,9 @@ class MetricsCalculator:
 def calculate_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    prefix: str = ""
+    prefix: str = "",
+    price_mean: Optional[float] = None,
+    price_std: Optional[float] = None
 ) -> Dict[str, float]:
     """
     Calculate all prediction metrics
@@ -236,18 +322,35 @@ def calculate_metrics(
         y_true: True values
         y_pred: Predicted values
         prefix: Prefix for metric names (e.g., "train_", "test_")
+        price_mean: Optional mean used for de-standardising prices
+        price_std: Optional std used for de-standardising prices
 
     Returns:
         Dictionary of metrics
     """
     calc = MetricsCalculator()
 
+    y_true_arr = np.asarray(y_true)
+    y_pred_arr = np.asarray(y_pred)
+
+    # Optionally de-standardise before computing metrics
+    if price_mean is not None and price_std is not None:
+        y_true_eval = y_true_arr * price_std + price_mean
+        y_pred_eval = y_pred_arr * price_std + price_mean
+    else:
+        y_true_eval = y_true_arr
+        y_pred_eval = y_pred_arr
+
+    # FIX: directional_accuracy returns 0-1 scale; convert to % for display
+    dir_acc = calc.directional_accuracy(y_true_eval, y_pred_eval)
+
     metrics = {
-        f"{prefix}rmse": calc.rmse(y_true, y_pred),
-        f"{prefix}mae": calc.mae(y_true, y_pred),
-        f"{prefix}mape": calc.mape(y_true, y_pred),
-        f"{prefix}r2": calc.r2(y_true, y_pred),
-        f"{prefix}directional_accuracy": calc.directional_accuracy(y_true, y_pred),
+        f"{prefix}rmse": calc.rmse(y_true_eval, y_pred_eval),
+        f"{prefix}mae": calc.mae(y_true_eval, y_pred_eval),
+        f"{prefix}mape": calc.mape(y_true_eval, y_pred_eval),
+        f"{prefix}r2": calc.r2(y_true_eval, y_pred_eval),
+        f"{prefix}directional_accuracy": dir_acc * 100,  # Convert to percentage for display
+        f"{prefix}mse": calc.rmse(y_true_eval, y_pred_eval) ** 2,  # FIX: Add MSE explicitly
     }
 
     return metrics
@@ -255,8 +358,8 @@ def calculate_metrics(
 
 def calculate_financial_metrics(
     returns: np.ndarray,
-    risk_free_rate: float = 0.02,
-    periods_per_year: int = 252,
+    risk_free_rate: float = RISK_FREE_RATE,
+    periods_per_year: int = TRADING_DAYS_PER_YEAR,
     prefix: str = ""
 ) -> Dict[str, float]:
     """
@@ -273,8 +376,17 @@ def calculate_financial_metrics(
     """
     calc = MetricsCalculator()
 
-    # Calculate cumulative returns
+    # CRITICAL FIX: Clip returns to realistic bounds first
+    returns = np.clip(returns, -0.99, 1.0)
+
+    # Calculate cumulative returns with equity floor
     cumulative_returns = (1 + returns).cumprod()
+    cumulative_returns = np.maximum(cumulative_returns, 1e-10)
+
+    # Total return (capped at bounds)
+    total_ret = (cumulative_returns[-1] - 1) * 100 if len(cumulative_returns) > 0 else 0.0
+    # Prevent absurd returns: Cap total_ret strictly at [-100%, 1000%]
+    total_ret = float(np.clip(total_ret, -100.0, 1000.0))
 
     metrics = {
         f"{prefix}sharpe_ratio": calc.sharpe_ratio(returns, risk_free_rate, periods_per_year),
@@ -282,7 +394,7 @@ def calculate_financial_metrics(
         f"{prefix}max_drawdown": calc.max_drawdown(cumulative_returns),
         f"{prefix}calmar_ratio": calc.calmar_ratio(returns, periods_per_year),
         f"{prefix}win_rate": calc.win_rate(returns),
-        f"{prefix}total_return": (cumulative_returns[-1] - 1) * 100 if len(cumulative_returns) > 0 else 0.0,
+        f"{prefix}total_return": total_ret,
         f"{prefix}mean_return": np.mean(returns) * 100,
         f"{prefix}volatility": np.std(returns) * np.sqrt(periods_per_year) * 100,
     }

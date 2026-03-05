@@ -162,6 +162,9 @@ class MonteCarloSimulator:
         x_new[:, :-1, :] = x[:, 1:, :]
 
         # Set last timestep's first feature to new value
+        # Convert numpy value to torch tensor if needed
+        if isinstance(new_value, np.ndarray) or isinstance(new_value, (np.float32, np.float64)):
+            new_value = float(new_value)
         x_new[:, -1, 0] = new_value
 
         return x_new

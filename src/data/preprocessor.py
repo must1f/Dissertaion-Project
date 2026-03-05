@@ -5,15 +5,68 @@ Data preprocessing: feature engineering, normalization, stationarity testing
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from statsmodels.tsa.stattools import adfuller
-import pandas_ta as ta
+
+# sklearn is optional; provide minimal scalers so training can run without it.
+try:  # pragma: no cover
+    from sklearn.preprocessing import StandardScaler, MinMaxScaler
+except ImportError:
+    class _BaseScaler:
+        def fit(self, X):
+            X = np.asarray(X)
+            self.mean_ = X.mean(axis=0)
+            self.std_ = X.std(axis=0) + 1e-8
+            return self
+
+        def transform(self, X):
+            X = np.asarray(X)
+            return (X - self.mean_) / self.std_
+
+        def fit_transform(self, X):
+            return self.fit(X).transform(X)
+
+    class StandardScaler(_BaseScaler):
+        pass
+
+    class MinMaxScaler:
+        def fit(self, X):
+            X = np.asarray(X)
+            self.min_ = X.min(axis=0)
+            self.max_ = X.max(axis=0)
+            self.range_ = self.max_ - self.min_ + 1e-8
+            return self
+
+        def transform(self, X):
+            X = np.asarray(X)
+            return (X - self.min_) / self.range_
+
+        def fit_transform(self, X):
+            return self.fit(X).transform(X)
+
+# statsmodels is optional; adfuller used only for stationarity checks
+try:  # pragma: no cover
+    from statsmodels.tsa.stattools import adfuller
+except ImportError:
+    def adfuller(*args, **kwargs):
+        # Return non-stationary by default: (statistic, pvalue, lags, nobs, crit values, icbest)
+        return 0.0, 1.0, 0, len(args[0]) if args else 0, {}, None
+
+# pandas_ta is optional - technical indicators will be skipped if not available
+try:
+    import pandas_ta as ta  # type: ignore
+    HAS_PANDAS_TA = True
+except ImportError:
+    ta = None
+    HAS_PANDAS_TA = False
 
 from ..utils.config import get_config
 from ..utils.logger import get_logger
 from ..utils.database import get_db
 
 logger = get_logger(__name__)
+
+_pandas_ta_warned = False
+if not HAS_PANDAS_TA:
+    logger.info("pandas_ta not available - technical indicators will fall back to built-in RSI/MACD/Bollinger/ATR")
 
 
 class DataPreprocessor:
@@ -123,86 +176,147 @@ class DataPreprocessor:
 
         return df
 
+    def _calculate_indicators_fallback(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Lightweight fallback indicators when pandas_ta is unavailable.
+        Implements: RSI(14), MACD(12,26,9), Bollinger Bands(20,2), ATR(14).
+        """
+        df = df.copy()
+
+        def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+            delta = series.diff()
+            gain = delta.clip(lower=0).ewm(alpha=1/length, adjust=False).mean()
+            loss = (-delta.clip(upper=0)).ewm(alpha=1/length, adjust=False).mean()
+            rs = gain / loss.replace(0, np.nan)
+            return 100 - (100 / (1 + rs))
+
+        def macd(series: pd.Series, fast=12, slow=26, signal=9):
+            ema_fast = series.ewm(span=fast, adjust=False).mean()
+            ema_slow = series.ewm(span=slow, adjust=False).mean()
+            line = ema_fast - ema_slow
+            signal_line = line.ewm(span=signal, adjust=False).mean()
+            hist = line - signal_line
+            return line, signal_line, hist
+
+        def bollinger(series: pd.Series, length=20, mult=2):
+            ma = series.rolling(length).mean()
+            sd = series.rolling(length).std()
+            upper = ma + mult * sd
+            lower = ma - mult * sd
+            return upper, ma, lower
+
+        def atr(high: pd.Series, low: pd.Series, close: pd.Series, length=14):
+            prev_close = close.shift(1)
+            tr = pd.concat([
+                (high - low),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ], axis=1).max(axis=1)
+            return tr.rolling(length).mean()
+
+        results = []
+        for ticker in df["ticker"].unique():
+            tdf = df[df["ticker"] == ticker].sort_values("time").copy()
+            tdf["rsi_14"] = rsi(tdf["close"])
+            macd_line, macd_signal, macd_hist = macd(tdf["close"])
+            tdf["macd"] = macd_line
+            tdf["macd_signal"] = macd_signal
+            tdf["macd_hist"] = macd_hist
+            upper, middle, lower = bollinger(tdf["close"])
+            tdf["bollinger_upper"] = upper
+            tdf["bollinger_middle"] = middle
+            tdf["bollinger_lower"] = lower
+            tdf["atr_14"] = atr(tdf["high"], tdf["low"], tdf["close"])
+            results.append(tdf)
+
+        return pd.concat(results, ignore_index=True)
+
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculate technical indicators using pandas_ta
-
-        Args:
-            df: DataFrame with OHLCV data
-
-        Returns:
-            DataFrame with technical indicators
+        Calculate technical indicators. Uses pandas_ta when available, otherwise
+        falls back to lightweight in-house implementations to avoid missing
+        feature columns and repeated warnings.
         """
+        if not HAS_PANDAS_TA:
+            if not _pandas_ta_warned:
+                logger.warning("pandas_ta not available - using fallback indicators (RSI, MACD, Bollinger, ATR)")
+            return self._calculate_indicators_fallback(df)
+
         df = df.copy()
         results = []
 
-        for ticker in df['ticker'].unique():
-            ticker_df = df[df['ticker'] == ticker].copy()
-            ticker_df = ticker_df.sort_values('time')
+        try:
+            for ticker in df['ticker'].unique():
+                ticker_df = df[df['ticker'] == ticker].copy()
+                ticker_df = ticker_df.sort_values('time')
 
-            # RSI (Relative Strength Index)
-            ticker_df['rsi_14'] = ta.rsi(ticker_df['close'], length=14)
+                # RSI (Relative Strength Index)
+                ticker_df['rsi_14'] = ta.rsi(ticker_df['close'], length=14)
 
-            # MACD (Moving Average Convergence Divergence)
-            macd = ta.macd(ticker_df['close'])
-            if macd is not None:
-                # Handle different pandas_ta versions
-                macd_cols = macd.columns.tolist()
-                macd_col = [c for c in macd_cols if c.startswith('MACD_') and not c.startswith(('MACDs_', 'MACDh_'))][0] if any(c.startswith('MACD_') and not c.startswith(('MACDs_', 'MACDh_')) for c in macd_cols) else None
-                signal_col = [c for c in macd_cols if c.startswith('MACDs_')][0] if any(c.startswith('MACDs_') for c in macd_cols) else None
-                hist_col = [c for c in macd_cols if c.startswith('MACDh_')][0] if any(c.startswith('MACDh_') for c in macd_cols) else None
+                # MACD (Moving Average Convergence Divergence)
+                macd = ta.macd(ticker_df['close'])
+                if macd is not None:
+                    # Handle different pandas_ta versions
+                    macd_cols = macd.columns.tolist()
+                    macd_col = [c for c in macd_cols if c.startswith('MACD_') and not c.startswith(('MACDs_', 'MACDh_'))][0] if any(c.startswith('MACD_') and not c.startswith(('MACDs_', 'MACDh_')) for c in macd_cols) else None
+                    signal_col = [c for c in macd_cols if c.startswith('MACDs_')][0] if any(c.startswith('MACDs_') for c in macd_cols) else None
+                    hist_col = [c for c in macd_cols if c.startswith('MACDh_')][0] if any(c.startswith('MACDh_') for c in macd_cols) else None
 
-                if macd_col:
-                    ticker_df['macd'] = macd[macd_col]
-                if signal_col:
-                    ticker_df['macd_signal'] = macd[signal_col]
-                if hist_col:
-                    ticker_df['macd_hist'] = macd[hist_col]
+                    if macd_col:
+                        ticker_df['macd'] = macd[macd_col]
+                    if signal_col:
+                        ticker_df['macd_signal'] = macd[signal_col]
+                    if hist_col:
+                        ticker_df['macd_hist'] = macd[hist_col]
 
-            # Bollinger Bands
-            bbands = ta.bbands(ticker_df['close'], length=20)
-            if bbands is not None:
-                # Handle different pandas_ta versions with different column names
-                bb_cols = bbands.columns.tolist()
-                upper_col = [c for c in bb_cols if c.startswith('BBU_')][0] if any(c.startswith('BBU_') for c in bb_cols) else None
-                middle_col = [c for c in bb_cols if c.startswith('BBM_')][0] if any(c.startswith('BBM_') for c in bb_cols) else None
-                lower_col = [c for c in bb_cols if c.startswith('BBL_')][0] if any(c.startswith('BBL_') for c in bb_cols) else None
+                # Bollinger Bands
+                bbands = ta.bbands(ticker_df['close'], length=20)
+                if bbands is not None:
+                    # Handle different pandas_ta versions with different column names
+                    bb_cols = bbands.columns.tolist()
+                    upper_col = [c for c in bb_cols if c.startswith('BBU_')][0] if any(c.startswith('BBU_') for c in bb_cols) else None
+                    middle_col = [c for c in bb_cols if c.startswith('BBM_')][0] if any(c.startswith('BBM_') for c in bb_cols) else None
+                    lower_col = [c for c in bb_cols if c.startswith('BBL_')][0] if any(c.startswith('BBL_') for c in bb_cols) else None
 
-                if upper_col:
-                    ticker_df['bollinger_upper'] = bbands[upper_col]
-                if middle_col:
-                    ticker_df['bollinger_middle'] = bbands[middle_col]
-                if lower_col:
-                    ticker_df['bollinger_lower'] = bbands[lower_col]
+                    if upper_col:
+                        ticker_df['bollinger_upper'] = bbands[upper_col]
+                    if middle_col:
+                        ticker_df['bollinger_middle'] = bbands[middle_col]
+                    if lower_col:
+                        ticker_df['bollinger_lower'] = bbands[lower_col]
 
-            # ATR (Average True Range) - volatility measure
-            ticker_df['atr_14'] = ta.atr(
-                ticker_df['high'],
-                ticker_df['low'],
-                ticker_df['close'],
-                length=14
-            )
+                # ATR (Average True Range) - volatility measure
+                ticker_df['atr_14'] = ta.atr(
+                    ticker_df['high'],
+                    ticker_df['low'],
+                    ticker_df['close'],
+                    length=14
+                )
 
-            # OBV (On-Balance Volume)
-            ticker_df['obv'] = ta.obv(ticker_df['close'], ticker_df['volume'])
+                # OBV (On-Balance Volume)
+                ticker_df['obv'] = ta.obv(ticker_df['close'], ticker_df['volume'])
 
-            # Stochastic Oscillator
-            stoch = ta.stoch(ticker_df['high'], ticker_df['low'], ticker_df['close'])
-            if stoch is not None:
-                # Handle different pandas_ta versions
-                stoch_cols = stoch.columns.tolist()
-                k_col = [c for c in stoch_cols if c.startswith('STOCHk_')][0] if any(c.startswith('STOCHk_') for c in stoch_cols) else None
-                d_col = [c for c in stoch_cols if c.startswith('STOCHd_')][0] if any(c.startswith('STOCHd_') for c in stoch_cols) else None
+                # Stochastic Oscillator
+                stoch = ta.stoch(ticker_df['high'], ticker_df['low'], ticker_df['close'])
+                if stoch is not None:
+                    # Handle different pandas_ta versions
+                    stoch_cols = stoch.columns.tolist()
+                    k_col = [c for c in stoch_cols if c.startswith('STOCHk_')][0] if any(c.startswith('STOCHk_') for c in stoch_cols) else None
+                    d_col = [c for c in stoch_cols if c.startswith('STOCHd_')][0] if any(c.startswith('STOCHd_') for c in stoch_cols) else None
 
-                if k_col:
-                    ticker_df['stoch_k'] = stoch[k_col]
-                if d_col:
-                    ticker_df['stoch_d'] = stoch[d_col]
+                    if k_col:
+                        ticker_df['stoch_k'] = stoch[k_col]
+                    if d_col:
+                        ticker_df['stoch_d'] = stoch[d_col]
 
-            results.append(ticker_df)
+                results.append(ticker_df)
 
-        combined_df = pd.concat(results, ignore_index=True)
-        logger.info(f"Calculated technical indicators for {len(df['ticker'].unique())} tickers")
+            combined_df = pd.concat(results, ignore_index=True)
+            logger.info(f"Calculated technical indicators for {len(df['ticker'].unique())} tickers")
+            return combined_df
+        except Exception as e:
+            logger.warning(f"pandas_ta failed ({e}); falling back to built-in indicators (RSI, MACD, Bollinger, ATR)")
+            return self._calculate_indicators_fallback(df)
 
         return combined_df
 

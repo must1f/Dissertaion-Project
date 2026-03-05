@@ -7,8 +7,19 @@ from typing import List, Optional, Dict
 from datetime import datetime
 import pandas as pd
 import yfinance as yf
-from alpha_vantage.timeseries import TimeSeries
-from tqdm import tqdm
+
+# Alpha Vantage is optional; if missing we degrade gracefully to yfinance-only.
+try:  # pragma: no cover
+    from alpha_vantage.timeseries import TimeSeries
+except ImportError:
+    TimeSeries = None
+
+# tqdm is optional; provide a no-op fallback so training doesn't fail
+try:  # pragma: no cover
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 from ..utils.config import get_config
 from ..utils.logger import get_logger

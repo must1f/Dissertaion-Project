@@ -1,0 +1,34 @@
+# Default evaluation configuration (starter scaffold)
+experiment:
+  name: "quick_eval_example"
+  seed: 42
+
+data:
+  split_strategy: "temporal"   # temporal|expanding|rolling
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  embargo_size: 5
+
+walk_forward:
+  enabled: false
+  method: "anchored"           # anchored|rolling|combinatorial
+  n_folds: 5
+  min_train_size: 252
+  min_test_size: 63
+  embargo_size: 5
+
+metrics:
+  include:
+    - rmse
+    - mae
+    - mape
+    - directional_accuracy
+  financial:
+    enabled: true
+
+output:
+  db_path: "results/experiments.db"
+  artifacts_dir: "results/artifacts"
+  leaderboard_top_n: 10
+

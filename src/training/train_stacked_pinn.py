@@ -31,7 +31,9 @@ from src.training.walk_forward import WalkForwardValidator
 from src.evaluation.financial_metrics import FinancialMetrics, compute_strategy_returns
 from src.utils.config import get_config
 from src.utils.logger import get_logger, ensure_logger_initialized
-from src.utils.reproducibility import set_seed, get_device
+from src.utils.reproducibility import set_seed, get_device, get_environment_info
+from src.training.model_checkpointer import ModelCheckpointer, CheckpointMetadata
+from src.training.model_registry import ModelRegistry, RegistryEntry
 from src.data.fetcher import DataFetcher
 from src.data.preprocessor import DataPreprocessor
 
@@ -196,7 +198,7 @@ def train_epoch(
     Train for one batch
 
     Returns:
-        Dict with losses
+        Dict with losses and directional accuracy
     """
     model.train()
 
@@ -245,13 +247,22 @@ def train_epoch(
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
 
-    # Return metrics
+    # Compute training directional accuracy (BUG #16 FIX)
+    # Compare predicted direction with actual direction
+    with torch.no_grad():
+        pred_direction = (return_pred > 0).float()
+        actual_direction = (y_batch > 0).float()
+        correct = (pred_direction == actual_direction).float().mean().item()
+        directional_accuracy = correct
+
+    # Return metrics including directional accuracy
     return {
         'total_loss': total_loss.item(),
         'prediction_loss': prediction_loss.item(),
         'regression_loss': regression_loss.item(),
         'classification_loss': classification_loss.item(),
         'physics_loss': physics_loss.item(),
+        'directional_accuracy': directional_accuracy,
         **physics_dict
     }
 
@@ -507,6 +518,9 @@ def main(args):
         optimizer, mode='min', factor=0.5, patience=10
     )
 
+    checkpointer = ModelCheckpointer(config.checkpoint_dir)
+    registry = ModelRegistry(config.project_root / "Models" / "registry.json")
+
     # Curriculum scheduler
     curriculum = CurriculumScheduler(
         initial_lambda_gbm=0.0,
@@ -559,6 +573,54 @@ def main(args):
         predictions=val_predictions.flatten(),
         actual_returns=y_val.flatten()
     )
+
+    # Persist best checkpoint with rich metadata and register
+    try:
+        env = get_environment_info()
+        metadata = CheckpointMetadata(
+            model_name=f"stacked_pinn_{args.model_type}",
+            experiment_id=f"stacked_pinn_{args.model_type}",
+            seed=config.training.random_seed,
+            metrics={"val_mse": float(val_metrics.get("mse", 0.0)), **financial_metrics},
+            regime=None,
+            git_commit=env.git_commit,
+            timestamp=env.timestamp,
+        )
+        saved_path = checkpointer.save(model, metadata, filename=save_path.name)
+        registry_key = f"{metadata.model_name}_seed{metadata.seed}"
+        registry.register(
+            registry_key,
+            RegistryEntry(
+                model_name=metadata.model_name,
+                path=str(saved_path),
+                metrics=metadata.metrics,
+                regime=metadata.regime,
+                git_commit=metadata.git_commit,
+            ),
+        )
+        # auto-promote best_overall on lower val_mse (fallback to val_loss)
+        best_metric = metadata.metrics.get("val_mse") or metadata.metrics.get("val_loss")
+        current_best = registry.best_overall(metric="val_mse")
+        if best_metric is not None:
+            promote = False
+            if current_best is None:
+                promote = True
+            else:
+                current_val = current_best.metrics.get("val_mse") or current_best.metrics.get("val_loss")
+                if current_val is None or best_metric < current_val:
+                    promote = True
+            if promote:
+                registry.register("best_overall", RegistryEntry(
+                    model_name=metadata.model_name,
+                    path=str(saved_path),
+                    metrics=metadata.metrics,
+                    regime=metadata.regime,
+                    git_commit=metadata.git_commit,
+                ))
+                logger.info("Promoted model to best_overall in registry (metric=val_mse)")
+        logger.info(f"Model registered as {registry_key}")
+    except Exception as exc:  # pragma: no cover
+        logger.warning(f"Could not persist checkpoint/registry entry: {exc}")
 
     # Save results
     results = {
