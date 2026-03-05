@@ -6282,6 +6282,8 @@ Enforced the Colab training notebook to pull only S&P 500 (^GSPC) data from the 
 1. **File**: `Jupyter/Colab_All_Models.ipynb`
    - Locked price and volatility data pulls to `^GSPC` with a dynamic 10-year range via `get_dynamic_date_range`, and hard-failed if the index data is missing.
    - Ensured dual-phase PINN metrics include mean error and corrected the DP summary print string for valid JSON serialization.
+   - Added an epoch-only progress mode (disables batch-level tqdm bars) to keep Colab output concise while still reporting per-epoch progress.
+   - Defaulted price-model training to multi-ticker mode so the research run aggregates across S&P 500 constituents by default.
    - Added a metrics coverage audit cell that verifies required metrics per model type, checks all plot/CSV artifacts exist, and writes `results/colab_runs/metrics_audit.json`.
 2. **File**: `DOCUMENT.md`
    - Documented the S&P 500 data enforcement and metrics audit additions.
