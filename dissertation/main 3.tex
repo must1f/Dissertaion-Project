@@ -1,0 +1,31 @@
+\documentclass[12pt]{report}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+
+\title{Physics-Informed Neural Networks for Financial Forecasting}
+\author{<Your Name>}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+This dissertation investigates physics-informed neural networks (PINNs) for financial forecasting, comparing them to standard deep learning baselines under rigorous, transaction-cost-aware evaluation protocols.%
+\end{abstract}
+\tableofcontents
+
+\input{chapters/introduction}
+\input{chapters/literature_review}
+\input{chapters/methodology}
+\input{chapters/experimental_setup}
+\input{chapters/results}
+\input{chapters/discussion}
+\input{chapters/conclusion}
+\appendix
+\input{chapters/appendix}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}

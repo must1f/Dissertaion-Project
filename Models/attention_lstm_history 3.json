@@ -1,0 +1,9 @@
+{
+  "train_loss": [],
+  "val_loss": [],
+  "train_data_loss": [],
+  "train_physics_loss": [],
+  "learning_rates": [],
+  "epochs": [],
+  "research_mode": true
+}

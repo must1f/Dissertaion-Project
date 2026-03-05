@@ -1,0 +1,109 @@
+# Docker Compose for PINN Financial Forecasting Web Application
+#
+# This compose file runs the modern React + FastAPI stack
+# Use: docker-compose -f docker-compose.webapp.yml up --build
+#
+# Services:
+#   - frontend: React + Vite (served via nginx on port 80)
+#   - backend: FastAPI + PyTorch (port 8000)
+#   - database: TimescaleDB/PostgreSQL (port 5432)
+
+version: '3.8'
+
+services:
+  # ============================================
+  # Database: TimescaleDB (PostgreSQL + Time-series)
+  # ============================================
+  database:
+    image: timescale/timescaledb:latest-pg15
+    container_name: pinn-database
+    environment:
+      POSTGRES_DB: pinn_forecasting
+      POSTGRES_USER: pinn_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-pinn_secure_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pinn_user -d pinn_forecasting"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pinn-network
+    restart: unless-stopped
+
+  # ============================================
+  # Backend: FastAPI + PyTorch ML Models
+  # ============================================
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.standalone
+    container_name: pinn-backend
+    environment:
+      - DATABASE_URL=postgresql://pinn_user:${DB_PASSWORD:-pinn_secure_password}@database:5432/pinn_forecasting
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=${DEBUG:-false}
+      - CORS_ORIGINS=http://localhost,http://localhost:80,http://frontend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code for development (remove in production)
+      - ./src:/app/src:ro
+      - ./Models:/app/Models
+      - ./data:/app/data:ro
+      - ./results:/app/results
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - pinn-network
+    restart: unless-stopped
+
+  # ============================================
+  # Frontend: React + Vite (served via nginx)
+  # ============================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost:8000
+        - VITE_WS_URL=ws://localhost:8000
+    container_name: pinn-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    networks:
+      - pinn-network
+    restart: unless-stopped
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  pinn-network:
+    driver: bridge
+
+# ============================================
+# Volumes
+# ============================================
+volumes:
+  postgres_data:
+    driver: local

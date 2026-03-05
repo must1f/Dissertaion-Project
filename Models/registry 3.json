@@ -1,0 +1,119 @@
+{
+  "lstm_seed42": {
+    "model_name": "lstm",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/lstm_best.pt",
+    "metrics": {
+      "val_loss": 6.78300679383318
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "gru_seed42": {
+    "model_name": "gru",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/gru_best.pt",
+    "metrics": {
+      "val_loss": 6.767506325492138
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "bilstm_seed42": {
+    "model_name": "bilstm",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/bilstm_best.pt",
+    "metrics": {
+      "val_loss": 5.602491814676688
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "attention_lstm_seed42": {
+    "model_name": "attention_lstm",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/attention_lstm_best.pt",
+    "metrics": {
+      "val_loss": 7.680802263230701
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "transformer_seed42": {
+    "model_name": "transformer",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/transformer_best.pt",
+    "metrics": {
+      "val_loss": 1.0048171877861023
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "pinn_baseline_seed42": {
+    "model_name": "pinn_baseline",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/pinn_baseline_best.pt",
+    "metrics": {
+      "val_loss": 3.4753058552742004
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "pinn_gbm_seed42": {
+    "model_name": "pinn_gbm",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/pinn_gbm_best.pt",
+    "metrics": {
+      "val_loss": 8187940.3
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "pinn_ou_seed42": {
+    "model_name": "pinn_ou",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/pinn_ou_best.pt",
+    "metrics": {
+      "val_loss": 2.896767370402813
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "pinn_black_scholes_seed42": {
+    "model_name": "pinn_black_scholes",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/pinn_black_scholes_best.pt",
+    "metrics": {
+      "val_loss": 2.9126336723566055
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "pinn_gbm_ou_seed42": {
+    "model_name": "pinn_gbm_ou",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/pinn_gbm_ou_best.pt",
+    "metrics": {
+      "val_loss": 3.007685363292694
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "pinn_global_seed42": {
+    "model_name": "pinn_global",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/pinn_global_best.pt",
+    "metrics": {
+      "val_loss": 2.7810696363449097
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "stacked_pinn_seed42": {
+    "model_name": "stacked_pinn",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/stacked_pinn_best.pt",
+    "metrics": {
+      "val_loss": 1.199507012963295
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  },
+  "residual_pinn_seed42": {
+    "model_name": "residual_pinn",
+    "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/residual_pinn_best.pt",
+    "metrics": {
+      "val_loss": 2.1502497792243958
+    },
+    "regime": null,
+    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+  }
+}

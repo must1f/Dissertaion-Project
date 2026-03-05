@@ -1,0 +1,25 @@
+project: "PINN Financial Forecasting"
+description: >
+  Physics-informed neural networks for financial forecasting with rigorous,
+  transaction-cost-aware evaluation and research-mode controls.
+
+implemented:
+  - Research-mode training with fixed hyperparameters and reproducible splits
+  - Comprehensive financial metrics with clipping/validation and deflated Sharpe
+  - Rolling-window stability analysis with serialized windows
+  - Robust comparison tooling (bootstrap CI, multiple-comparison correction)
+  - Dashboards for training, metrics, and analysis (Streamlit/React)
+  - Cross-asset evaluation script for FX/commodities NPZs
+  - Physics-loss ablation automation (inference-only tables)
+  - Macro feature merge pipeline
+  - Dissertation LaTeX skeleton with chapter placeholders
+
+pending:
+  - Fill dissertation chapters with full content and references
+  - Acquire/ingest macro CSVs to feed `data/merge_macro_features.py`
+  - Provide cross-asset prediction NPZs in `results/cross_asset/` for evaluation
+  - Expand smoke tests into deeper unit/integration coverage (current tests are light)
+
+tests:
+  - Smoke import coverage in `tests/test_smoke_imports.py`
+  - Existing domain tests: data pipeline, financial metrics, backtester, walk-forward, stacked PINN, trading agent

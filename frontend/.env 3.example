@@ -1,0 +1,34 @@
+# PINN Financial Forecasting - Frontend Environment Variables
+# Copy this file to .env and fill in your values
+
+# =============================================================================
+# API CONFIGURATION
+# =============================================================================
+
+# Backend API URL
+# In development: http://localhost:8000
+# In production: https://api.your-domain.com
+VITE_API_URL=http://localhost:8000
+
+# WebSocket URL for real-time updates
+# In development: ws://localhost:8000
+# In production: wss://api.your-domain.com
+VITE_WS_URL=ws://localhost:8000
+
+# =============================================================================
+# OPTIONAL: FEATURE FLAGS
+# =============================================================================
+
+# Enable mock data mode (true/false)
+# When true, uses mock data instead of API calls
+# VITE_USE_MOCK_DATA=false
+
+# Enable debug mode (shows additional debugging info in UI)
+# VITE_DEBUG=false
+
+# =============================================================================
+# OPTIONAL: ANALYTICS
+# =============================================================================
+
+# Analytics tracking ID (e.g., Google Analytics)
+# VITE_ANALYTICS_ID=UA-XXXXXXXXX-X
