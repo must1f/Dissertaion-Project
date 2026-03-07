@@ -304,6 +304,30 @@ class ModelRegistry:
         models['heston'] = models['heston_pinn']
         models['stacked_volatility_pinn'] = models['stacked_vol_pinn']
 
+        # ========== FINANCIAL DUAL-PHASE PINN MODELS ==========
+        models['financial_pinn'] = ModelInfo(
+            model_key='financial_pinn',
+            model_name='Financial PINN',
+            model_type='advanced',
+            architecture='FinancialPINNBase',
+            description='Single-phase PINN with GBM, OU, and Black-Scholes constraints',
+            physics_constraints={'lambda_gbm': 0.1, 'lambda_ou': 0.1, 'lambda_bs': 0.05}
+        )
+
+        models['financial_dp_pinn'] = ModelInfo(
+            model_key='financial_dp_pinn',
+            model_name='Financial Dual-Phase PINN',
+            model_type='advanced',
+            architecture='FinancialDualPhasePINN',
+            description='Two-phase PINN with financial physics (GBM, OU, Black-Scholes) and intermediate constraint',
+            physics_constraints={'lambda_gbm': 0.1, 'lambda_ou': 0.1, 'lambda_bs': 0.05, 'lambda_intermediate': 10.0}
+        )
+
+        # Financial DP-PINN aliases
+        models['fin_pinn'] = models['financial_pinn']
+        models['fin_dp_pinn'] = models['financial_dp_pinn']
+        models['financial_dual_phase'] = models['financial_dp_pinn']
+
         # Check training status for all models
         self._update_training_status(models)
 
@@ -770,6 +794,39 @@ class ModelRegistry:
                     lambda_garch=physics.get('lambda_garch', 0.1),
                     lambda_feller=physics.get('lambda_feller', 0.05),
                     lambda_leverage=physics.get('lambda_leverage', 0.05)
+                )
+
+            # ========== FINANCIAL DUAL-PHASE PINN ARCHITECTURES ==========
+            elif architecture == 'FinancialPINNBase':
+                from .financial_dp_pinn import FinancialPINNBase, FinancialPhysicsConfig
+                config = FinancialPhysicsConfig(
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.05),
+                )
+                return FinancialPINNBase(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    config=config,
+                )
+
+            elif architecture == 'FinancialDualPhasePINN':
+                from .financial_dp_pinn import FinancialDualPhasePINN, FinancialPhysicsConfig
+                config = FinancialPhysicsConfig(
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.05),
+                    lambda_intermediate=physics.get('lambda_intermediate', 10.0),
+                )
+                return FinancialDualPhasePINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    phase_split=0.6,
+                    config=config,
                 )
 
             else:
