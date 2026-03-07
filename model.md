@@ -1,5 +1,5 @@
 # Model Architecture & Training Documentation (PINN Financial Forecasting)
-# Author: Codex | Last Audit: 05 March 2026 | Language: British English
+# Author: Codex | Last Audit: 07 March 2026 | Language: British English
 # AUDIT STATUS: IMPLEMENTATIONS VERIFIED - EVALUATION PENDING FIXES (see §15)
 
 ----------------------------------------------------------------------
@@ -10,8 +10,10 @@
 - Documented physics-loss equations, scale/units, and BS autograd path; flagged mixed-scale risks with fixes.
 - Introduced leakage & causality safeguards, tensor/scale reference table, and a focused ablation plan.
 - **[2026-03-04] Added Dual-Phase PINN (DP-PINN) for Burgers' equation**: BurgersPINN, DualPhasePINN with phase-splitting for stiff PDEs, Latin Hypercube Sampling, Adam+L-BFGS training, L2 error evaluation.
+- **[2026-03-07] Financial Dual-Phase PINNs (fixed + adaptive) with physics audit**: log-space GBM drift, OU-primary regularisation, BS on de-normalised prices, continuity penalties, volatility-gated adaptive phase blending.
+- **[2026-03-07] Adaptive Financial Dual-Phase PINN training pipeline added to Colab**: dedicated notebook cell for `adaptive_dual_phase_pinn` alongside existing financial PINN variants.
 - **[2026-03-05] COMPREHENSIVE CODEBASE AUDIT**:
-  - Verified ALL 22 model classes (26+ with aliases) have REAL PyTorch implementations
+  - Verified ALL 24 model classes (28+ with aliases) have REAL PyTorch implementations
   - Confirmed NO placeholders, mocks, or stubs found anywhere in the codebase
   - Documented all 30+ metrics with implementation files and line numbers
   - Added 23+ visualization components (7 matplotlib + 16 Recharts)
@@ -74,18 +76,19 @@ Hyperparameters shown = research mode (hidden_dim=512, num_layers=4, dropout=0.1
 - Embed: Linear(D→d_model)×√d_model; sinusoidal PosEnc; dropout.
 - Encoder × num_layers: MHA (nhead=4) + Residual + LN; FFN d_model→512→d_model + Residual + LN.
 - Pool: last token → Linear d_model→(dim_ff/2)→ReLU→Dropout→Linear→1.
-- Causality: **non‑causal by default** (no mask). To enforce causality, pass `generate_square_subsequent_mask(...)`.
+- Causality: **causal by default** (`causal=True` auto-generates mask). Set `causal=False` explicitly for oracle experiments.
 
 ## 2.3 PINN (price) — `src/models/pinn.py`
 - Base model: LSTM / GRU / Transformer (as above).
 - Loss: L_total = L_data + L_physics + L_BS (optional). dt = 1/252 years (`src/constants.py:24-36`).
 - λ precedence (highest last): class defaults λ_gbm=λ_ou=λ_bs=λ_lang=0.1 → registry variant override (`src/models/model_registry.py:109-162`) → checkpoint-stored values.
+- Black–Scholes term is a steady-state **regulariser on stock-price forecasts** (∂V/∂t omitted); treat as inductive bias, not a full option-PDE solver.
 
 ### Physics losses (implemented)
-1) GBM drift (diffusion ignored): residual = (S_next−S)/dt − μ·S; S=prices[:, :-1], μ=mean(returns) (`src/models/pinn.py:361-376`). **Note:** μ is estimated in log-return space but applied to price drift (units mismatch).  
-2) OU drift (diffusion ignored): residual = (X_next−X)/dt − θ(μ−X); θ=softplus(θ_raw) learnable; L_OU = mean(residual²) (`src/models/pinn.py:378-397`).  
-3) Langevin drift: residual = (X_next−X)/dt + γ·(−returns); γ=softplus(γ_raw); T learned but unused; L_Langevin = mean(residual²) (`src/models/pinn.py:399-421`).  
-4) Black‑Scholes autograd (steady-state, ∂V/∂t omitted): bs_residual = 0.5σ²S²d²V/dS² + rS dV/dS − rV computed via a **second forward on x_grad (requires_grad)** with autograd (`src/models/pinn.py:181-266`, `547-590`). V is the price forecaster, not an option price; scales are mixed (normalised V,S with raw σ).
+1) GBM drift (log-space, diffusion ignored): residual = [log(S_next/S) − (μ − 0.5σ²)·dt]/dt; μ estimated in log space; residual std-normalised for stable λ (`src/models/pinn.py:173-205`, `450-505`).  
+2) OU drift: residual = (X_next−X)/dt − θ(μ−X); θ=softplus(θ_raw) learnable; residual std-normalised; L_OU = mean(residual²) (`src/models/pinn.py:370-420`).  
+3) Langevin drift: residual = (X_next−X)/dt + γ·(−returns); diffusion consistency via √(2γT); residuals std-normalised (`src/models/pinn.py:404-444`).  
+4) Black‑Scholes autograd (steady-state, ∂V/∂t omitted): bs_residual = 0.5σ²S²d²V/dS² + rS dV/dS − rV using autograd on normalised inputs but **de-normalising V,S** before PDE; residual std-normalised; inductive bias only (`src/models/pinn.py:206-369`, `717-744`).
 
 ### Data & physics application — `src/training/trainer.py:243-276`
 - L_data on ŷ,y.  
@@ -107,6 +110,12 @@ Hyperparameters shown = research mode (hidden_dim=512, num_layers=4, dropout=0.1
 - Direction head: Linear 256→32→2.  
 - Physics: λ_gbm=λ_ou=0.1 on returns only, θ fixed at 1.0.
 
+### Financial Dual-Phase PINNs — `src/models/financial_dp_pinn.py`
+- Backbone: LSTM (hidden_dim configurable) → head MLP. Physics via `FinancialPhysicsLoss` (log-space GBM, OU primary, optional BS steady-state). Residuals std-normalised (dt=1/252) with RMS logging.
+- Fixed split (`FinancialDualPhasePINN`): temporal split of the input window; phase1 on early segment, phase2 on late segment; loss = λ_data·MSE + λ_physics (per phase) + λ_intermediate·MSE(phase1_pred, phase2_pred) for continuity. Metadata sliced per phase for physics terms.
+- Adaptive split (`AdaptiveFinancialDualPhasePINN`): volatility/residual-driven gate (MLP over rolling/recent vol + mean abs residual) produces gate g∈[0,1]; prediction = g·phase1 + (1−g)·phase2; continuity penalty weighted by g(1−g). Gate stats logged (mean/std).
+- Physics specifics: GBM drift in log space: [log(S_next/S) − (μ−0.5σ²)dt]/dt; OU on returns with learnable θ, μ; BS residual on de-normalised prices (steady-state, small λ). Residual RMS tracked for diagnostics.
+
 ## 2.5 Volatility Models — `src/models/volatility.py`
 ### Baselines
 - VolatilityLSTM/GRU: backbone (hidden_dim=128, layers=2, dropout=0.2) → last h → MLP → Softplus → variance forecast.
@@ -116,7 +125,7 @@ Hyperparameters shown = research mode (hidden_dim=512, num_layers=4, dropout=0.1
 - VolatilityPINN: variance head (Softplus) + physics loss = OU mean-reversion + GARCH(1,1) consistency + Feller positivity + Leverage; learnable θ, ω, α, β (constrained).
 - HestonPINN: learnable κ, θ, ξ, ρ with Heston drift + Feller + Leverage penalties.
 - StackedVolatilityPINN: encoder+RNN with same OU/GARCH/Feller/Leverage set.
-- **PENDING VERIFICATION** — dataset construction for variance targets, variance_history, returns alignment in dataloader (`src/data/dataset.py`). See §15 checklist.
+ - Volatility target alignment checked in training data prep (`scripts/train_models.py` assertions on prices/returns/volatilities).
 
 ## 2.6 Normalisation & Units
 | Item | Scale | Source |
@@ -322,8 +331,235 @@ x → Base RNN → h[512], base_pred[1]
 ### 7) VolatilityPINN (ASCII)
 ```
 x → LSTM/GRU (128, L2) → h → variance head (Softplus) → σ̂²
-Loss = MSE + λ_ou·OU + λ_garch·GARCH + λ_feller·pos + λ_leverage·corr
+Loss = MSE + λ_ou·OU + λ_garch·GARCH + λ_heston·(dV/dt−κ(θ−V)) + λ_feller·pos/Feller + λ_leverage·corr
 ```
+
+### 8) Financial PINNs (price) — `src/models/financial_dp_pinn.py`
+
+**FinancialPINNBase (single-phase)**
+- Backbone: LSTM (hidden_dim=128, layers=2, dropout=0.2) → last h → MLP → ŷ_z ∈ ℝ^(B×1)
+- Physics: λ_gbm=0.1, λ_ou=0.1, λ_bs=0.05 (defaults); residuals GBM/OU/BS are normalised by std; learned θ, μ.
+- Metadata: prices (GBM/BS), returns (OU), volatilities (σ for BS), inputs (for autograd dV/dS).
+
+**FinancialDualPhasePINN**
+- Two FinancialPINNBase networks (phase1, phase2); phase_split≈0.6 of batch.
+- Loss: phase1 (data+GBM+OU+BS) + phase2 (same) + λ_ic·IC (optional) + λ_intermediate·continuity between phases; ensemble forward averages phases when phase not specified.
+
+FinancialPINNBase (ASCII)
+```
+x → LSTM(128,L2) → h_T[128] → Linear→ReLU→Dropout→Linear → ŷ_z
+Loss = MSE + λ_gbm·GBM + λ_ou·OU + λ_bs·BS_autograd (residuals std-normalised)
+```
+
+FinancialDualPhasePINN (ASCII)
+```
+x → split(batch, phase_split≈0.6)
+phase1: FinancialPINNBase → loss1 (+ optional λ_ic·IC)
+phase2: FinancialPINNBase → loss2 + λ_intermediate·‖ŷ₂,start − ŷ₁,end‖²
+total_loss = loss1 + loss2
+forward (phase=None): 0.5·(ŷ_phase1 + ŷ_phase2)
+```
+
+### 3.8 Complete Model Gallery (all registry models)
+
+**Outputs at a glance**
+- Price forecasters (lstm, gru, bilstm, attention_lstm, transformer): `ŷ_price_z ∈ ℝ^(B×1)`
+- PINN price variants (baseline_pinn, gbm, ou, black_scholes, gbm_ou, global): `ŷ_price_z ∈ ℝ^(B×1)` + physics losses
+- Advanced PINN (stacked, residual, spectral_pinn): `ŷ_price_z ∈ ℝ^(B×1)` + aux heads (direction/regime)
+- Financial PINNs (financial_pinn, financial_dp_pinn): `ŷ_price_z ∈ ℝ^(B×1)` + GBM/OU/BS with residual std normalisation
+- Volatility family (vol_lstm, vol_gru, vol_transformer, vol_pinn, heston_pinn, stacked_vol_pinn): `σ̂² ∈ ℝ^(B×1)` (Softplus variance)
+- PDE (burgers_pinn, dual_phase_pinn): `û(x,t)` over space-time grid
+
+#### Baseline price forecasters (lstm, gru, bilstm, attention_lstm, transformer)
+| Model | Causality | Output |
+|-------|-----------|--------|
+| lstm | Causal | ŷ_z ∈ ℝ^(B×1) |
+| gru | Causal | ŷ_z ∈ ℝ^(B×1) |
+| bilstm | Non-causal within window | ŷ_z ∈ ℝ^(B×1) |
+| attention_lstm | Causal | ŷ_z ∈ ℝ^(B×1) |
+| transformer (causal default) | Causal | ŷ_z ∈ ℝ^(B×1) |
+| transformer (oracle/unmasked) | Non-causal | ŷ_z ∈ ℝ^(B×1) |
+
+BiLSTM (Mermaid)
+```
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f5f5f5","primaryTextColor":"#222","primaryBorderColor":"#333","lineColor":"#555","secondaryColor":"#e8f0ff","tertiaryColor":"#fff8e6","fontSize":"13px"}}}%%
+flowchart TD
+  X[x ∈ ℝ^(B×T×D)]:::input
+  B[BiLSTM D→512, layers=4<br/>h_T^f, h_T^b ∈ ℝ^(B×512)]:::model
+  C[Concat h_T^f ; h_T^b ∈ ℝ^(B×1024)]:::model
+  H1[Linear 1024→512 + ReLU + Dropout]:::model
+  H2[Linear 512→1]:::output
+  Y[ŷ_z ∈ ℝ^(B×1)]:::output
+  X --> B --> C --> H1 --> H2 --> Y
+```
+
+Attention LSTM (Mermaid)
+```
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f5f5f5","primaryTextColor":"#222","primaryBorderColor":"#333","lineColor":"#555","secondaryColor":"#e8f0ff","tertiaryColor":"#fff8e6","fontSize":"13px"}}}%%
+flowchart TD
+  X[x ∈ ℝ^(B×T×D)]:::input
+  L[LSTM D→512, L4]:::model
+  H[H ∈ ℝ^(B×T×512)]:::model
+  A[Attention: Linear→Tanh→Linear→softmax_t]:::model
+  C[Context = Σ α_t h_t ∈ ℝ^(B×512)]:::model
+  H1[Linear 512→512 + ReLU + Dropout]:::model
+  H2[Linear 512→1]:::output
+  Y[ŷ_z ∈ ℝ^(B×1)]:::output
+  X --> L --> H --> A --> C --> H1 --> H2 --> Y
+```
+
+Transformer graph already shown in §3.5 (causal mask applied by default; disable with `causal=False` for oracle use).
+
+#### PINN price variants (baseline_pinn, gbm, ou, black_scholes, gbm_ou, global)
+| Variant | λ_gbm | λ_ou | λ_bs | λ_langevin | Notes |
+|---------|-------|------|------|------------|-------|
+| baseline_pinn | 0.0 | 0.0 | 0.0 | 0.0 | data-only PINN head |
+| gbm | 0.1 | 0.0 | 0.0 | 0.0 | trend drift regulariser |
+| ou | 0.0 | 0.1 | 0.0 | 0.0 | mean-reversion drift |
+| black_scholes | 0.0 | 0.0 | 0.1 | 0.0 | no-arbitrage autograd |
+| gbm_ou | 0.05 | 0.05 | 0.0 | 0.0 | hybrid drift |
+| global | 0.05 | 0.05 | 0.03 | 0.02 | all constraints |
+
+PINN Variant Graph (shared structure; λ switches per row above)
+```
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f5f5f5","primaryTextColor":"#222","primaryBorderColor":"#333","lineColor":"#555","secondaryColor":"#e8f0ff","tertiaryColor":"#fff8e6","fontSize":"13px"}}}%%
+flowchart TD
+  X[x ∈ ℝ^(B×T×D)]:::input
+  PZ[prices ∈ ℝ^(B×T)]:::metadata
+  RT[returns ∈ ℝ^(B×T)]:::metadata
+  VOL[vols ∈ ℝ^(B×T)]:::metadata
+  M[Base: LSTM/GRU/Transformer]:::model
+  H1[Pool / last token]:::model
+  H2[Head → ŷ_z ∈ ℝ^(B×1)]:::output
+  Ld[MSE(ŷ_z, y_z)]:::loss
+  Lg[λ_gbm · GBM drift]:::physics
+  Lo[λ_ou · OU drift]:::physics
+  Ll[λ_lang · Langevin]:::physics
+  Lbs[λ_bs · Black-Scholes autograd]:::physics
+  Ltot[Total loss]:::loss
+  X --> M --> H1 --> H2 --> Ld --> Ltot
+  PZ --> Lg --> Ltot
+  RT --> Lo --> Ltot
+  RT --> Ll --> Ltot
+  VOL --> Lbs --> Ltot
+  X --> Lbs
+```
+
+#### Advanced PINN (stacked, residual, spectral_pinn)
+
+StackedPINN (Mermaid)
+```
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f5f5f5","primaryTextColor":"#222","primaryBorderColor":"#333","lineColor":"#555","secondaryColor":"#e8f0ff","tertiaryColor":"#fff8e6","fontSize":"13px"}}}%%
+flowchart TD
+  X[x ∈ ℝ^(B×T×D)]:::input
+  PE[PhysicsEncoder 4×(Linear→LN→GELU→Dropout)]:::model
+  LSTM[LSTM head h_lstm ∈ ℝ^(B×512)]:::model
+  GRU[GRU head h_gru ∈ ℝ^(B×512)]:::model
+  CAT[Concat h_lstm ; h_gru ∈ ℝ^(B×1024)]:::model
+  MLP[MLP 1024→256→128]:::model
+  REG[Reg head 128→1 (ŷ_z)]:::output
+  DIR[Dir head 128→2]:::output
+  PHX[λ_gbm/λ_ou on returns]:::physics
+  X --> PE --> LSTM
+  PE --> GRU
+  LSTM --> CAT
+  GRU --> CAT --> MLP --> REG
+  MLP --> DIR
+  X --> PHX
+```
+
+ResidualPINN (Mermaid)
+```
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f5f5f5","primaryTextColor":"#222","primaryBorderColor":"#333","lineColor":"#555","secondaryColor":"#e8f0ff","tertiaryColor":"#fff8e6","fontSize":"13px"}}}%%
+flowchart TD
+  X[x ∈ ℝ^(B×T×D)]:::input
+  B[Base RNN → h ∈ ℝ^(B×512)]:::model
+  P[base_pred = Linear 512→1]:::model
+  F[[concat(h, base_pred)]]:::model
+  C[4× (Linear→256 + LN + Tanh + Dropout)]:::model
+  Corr[correction 256→1]:::model
+  Sum[ŷ_z = base_pred + correction]:::output
+  Dir[Dir head 256→32→2]:::output
+  Phys[λ_gbm/λ_ou on returns]:::physics
+  X --> B --> P --> F --> C --> Corr --> Sum
+  C --> Dir
+  X --> Phys
+```
+
+SpectralRegimePINN (Mermaid)
+```
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f5f5f5","primaryTextColor":"#222","primaryBorderColor":"#333","lineColor":"#555","secondaryColor":"#e8f0ff","tertiaryColor":"#fff8e6","fontSize":"13px"}}}%%
+flowchart TD
+  X[x ∈ ℝ^(B×T×D)]:::input
+  RegP[regime_probs ∈ ℝ^(B×R)]:::metadata
+  SE[SpectralEncoder (FFT + attn)]:::model
+  RE[RegimeEncoder (dense)]:::model
+  FU[Fusion: concat x + spectral + regime → Linear→LN→GELU]:::model
+  LSTM[LSTM hidden_dim]:::model
+  Gate[Optional regime gate sigmoid]:::model
+  Y[ŷ_z ∈ ℝ^(B×1)]:::output
+  RG[Regime logits ∈ ℝ^(B×R)]:::output
+  Phys[GBM + OU + autocorr + spectral losses]:::physics
+  X --> SE
+  RegP --> RE
+  SE --> FU
+  RE --> FU
+  FU --> LSTM --> Gate --> Y
+  LSTM --> RG
+  X --> Phys
+```
+
+#### Volatility models (variance forecasts)
+| Model | Backbone | Physics |
+|-------|----------|---------|
+| vol_lstm / vol_gru | LSTM/GRU (128, L2) | Data-only |
+| vol_transformer | Transformer (masked, L2, nhead=4) | Data-only |
+| vol_pinn | LSTM/GRU → variance head | OU + GARCH + Feller + Leverage |
+| heston_pinn | LSTM/GRU → variance head | Heston drift + Feller + Leverage |
+| stacked_vol_pinn | Encoder + RNN | Same OU/GARCH/Feller/Leverage set |
+
+Volatility Baseline Graph (vol_lstm / vol_gru / vol_transformer)
+```
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f5f5f5","primaryTextColor":"#222","primaryBorderColor":"#333","lineColor":"#555","secondaryColor":"#e8f0ff","tertiaryColor":"#fff8e6","fontSize":"13px"}}}%%
+flowchart TD
+  X[x ∈ ℝ^(B×T×D)]:::input
+  B[Backbone: LSTM/GRU/Transformer]:::model
+  P[Pool last hidden / token]:::model
+  H1[Linear→GELU→Dropout]:::model
+  Var[Variance head → Softplus]:::output
+  X --> B --> P --> H1 --> Var
+```
+
+Volatility PINN & Heston PINN Graph
+```
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f5f5f5","primaryTextColor":"#222","primaryBorderColor":"#333","lineColor":"#555","secondaryColor":"#e8f0ff","tertiaryColor":"#fff8e6","fontSize":"13px"}}}%%
+flowchart TD
+  X[x ∈ ℝ^(B×T×D)]:::input
+  B[Backbone: LSTM/GRU]:::model
+  P[Pool last h]:::model
+  Var[Variance head → Softplus σ̂²]:::output
+  Ld[MSE(σ̂², target)]:::loss
+  OU[λ_ou · OU drift]:::physics
+  GARCH[λ_garch · GARCH(1,1)]:::physics
+  Feller[λ_feller · positivity]:::physics
+  Lev[λ_leverage · return-vol corr]:::physics
+  Hes[Heston drift + Feller + Leverage]:::physics
+  X --> B --> P --> Var --> Ld
+  Ld --> Total[Total loss]:::loss
+  OU --> Total
+  GARCH --> Total
+  Feller --> Total
+  Lev --> Total
+  Hes --> Total
+```
+
+#### PDE models (burgers_pinn, dual_phase_pinn)
+| Model | Output | Graph |
+|-------|--------|-------|
+| burgers_pinn | û(x,t) ∈ ℝ | §7.4 ASCII + autograd | 
+| dual_phase_pinn | û₁(x,t≤0.4), û₂(x,t>0.4) | §7.5 Mermaid |
+
+Outputs for PDE models are continuous fields over the test grid; see §7.10 for expected error ranges and required plots.
 
 ----------------------------------------------------------------------
 4) Tensor & Scale Reference Table
@@ -381,17 +617,17 @@ residual_normalised = residual / (residual.std() + 1e-8)
 - This is acceptable for forecasting but must be stated clearly.
 
 **Implementation status:**
-- [ ] **PENDING**: Modify `black_scholes_autograd_residual` to denormalise V,S
-- [ ] **PENDING**: Add residual standardisation to GBM/OU/Langevin losses
-- [ ] **PENDING**: Log residual RMS and λ-weighted contributions per epoch
+- [x] Denormalise `black_scholes_autograd_residual` (V,S) with scaler guard
+- [x] Residual standardisation added to GBM/OU/Langevin losses
+- [x] Residual RMS and λ-weighted contributions emitted in loss_dict
 
 **Reference:** `src/models/pinn.py:181-266` (BS autograd), `src/models/pinn.py:361-421` (GBM/OU/Langevin)
 
 ----------------------------------------------------------------------
 5) Leakage, Causality & Verification Section
 ----------------------------------------------------------------------
-Risks: bidirectional window look‑ahead (BiLSTM), unmasked Transformer, scaler fit leakage, windows crossing splits, look‑ahead features.
-Current safeguards: temporal split (`src/data/preprocessor.py:496-520`), train‑only scaler fit (`scripts/train_models.py:184-205`); masked attention only in volatility Transformer; BiLSTM allowed but marked non‑causal; Transformer unmasked by default.
+Risks: bidirectional window look‑ahead (BiLSTM), deliberately unmasked Transformer (oracle mode), scaler fit leakage, windows crossing splits, look‑ahead features.
+Current safeguards: temporal split (`src/data/preprocessor.py:496-520`), train‑only scaler fit (`scripts/train_models.py:184-205`); masked attention only in volatility Transformer; BiLSTM allowed but marked non‑causal; Transformer now **causal by default** (`causal=True` auto-mask); oracle mode requires explicit `causal=False`.
 
 ### Causality Classification
 | Model | Causality | Leaderboard | Notes |
@@ -400,8 +636,8 @@ Current safeguards: temporal split (`src/data/preprocessor.py:496-520`), train�
 | GRU | **Causal** | Forecasting | Unidirectional, processes past only |
 | Attention LSTM | **Causal** | Forecasting | Attention over past window only |
 | **BiLSTM** | **Non-causal** | Oracle | Future context within window |
-| **Transformer (default)** | **Non-causal** | Oracle | No mask = full window attention |
-| Transformer (masked) | **Causal** | Forecasting | Requires explicit mask |
+| **Transformer (default)** | **Causal** | Forecasting | Auto-mask when `causal=True` (default) |
+| Transformer (oracle) | **Non-causal** | Oracle | Set `causal=False` to disable mask |
 | All PINN variants | Inherits base | — | Depends on base model choice |
 
 **Rule:** "Forecasting" leaderboard = only causal models. "Oracle" leaderboard = non-causal (for ablation/upper-bound studies).
@@ -416,15 +652,15 @@ All financial metrics **MUST** follow this contract:
 
 **Implementation status:**
 - [x] Position lag: implemented (`financial_metrics.py:1164-1166`)
-- [x] Optional de-standardisation: implemented (`financial_metrics.py:1116-1118`, `metrics.py:337-342`)
-- [ ] **PENDING**: Enforce de-standardisation by default (currently optional)
-- [ ] **PENDING**: Add assertion to fail fast if z-scores passed to trading metrics
+- [x] De-standardisation enforced by default with scaler requirement (`financial_metrics.py`, `compute_strategy_returns`)
+- [x] Fail-fast assertions for z-score inputs to trading metrics (`financial_metrics.py`)
 
 ### Verification Checklist
 - Assert sequence windows do not straddle split boundaries.
 - Assert scaler fitted on train only; val/test transformed with frozen params.
 - If causal config enabled, assert mask passed to Transformer forward.
 - **Assert de-standardisation before financial metrics** (see §15).
+- Oracle models (BiLSTM, unmasked Transformer) must be explicitly whitelisted for evaluation; causal leaderboard remains forecasting-only.
 
 Optional pseudocode assertions:
 ```python
@@ -439,7 +675,26 @@ assert torch.all(torch.isneginf(mask.triu(1)))
 y_hat_price = y_hat * close_std + close_mean
 assert np.all(y_hat_price > 0), "De-standardised prices must be positive"
 assert metrics_use_price_scale(y_hat_price)
+
+# diagnostics
+plot_loss_curves(train_loss, val_loss)
+plot_price_overlay(predicted_prices, actual_prices)
 ```
+
+---
+
+## Dissertation Risk Dashboard (ranked)
+
+1) Final results not dissertation-safe yet: several models trained for 1 epoch; clip-bound metrics; some models lack usable runs. Re-run all under the fixed evaluation contract.
+2) Historical finance metrics may be invalid: z-scores treated as prices/returns in old runs; all tables must be regenerated after de-standardisation fixes.
+3) Undertraining: 1-epoch runs invalidate comparisons; ensure like-for-like training depth before citing.
+4) Causal vs oracle contamination: BiLSTM/unmasked Transformer must be excluded from causal leaderboards unless explicitly labeled oracle.
+5) Physics terms are regularisers, not full market laws: describe GBM/OU/BS/Langevin as inductive bias, not solved PDEs.
+6) Past BS/dimensional mixing: pre-fix runs are unreliable; only post-fix runs with denorm BS residual should be reported.
+7) Metric clipping hides bugs: any Sharpe/Sortino at clip bounds must be investigated; use raw metrics for analysis.
+8) Breadth > validation: many architectures, few clean experiments; prioritize depth and reruns over adding models.
+9) DP-PINN finance claims need ablations: prove phase splitting/gating gains vs simpler baselines.
+10) Reproducibility loop not complete until reruns stored with seeds, scalers, split hashes, and oracle flags.
 
 ----------------------------------------------------------------------
 6) Ablation Plan
@@ -662,12 +917,16 @@ At low viscosity (ν ≈ 0.003), the solution develops steep gradients (shocks) 
 | GRU | Baseline | `baseline.py:134-236` | 4-layer GRU, fewer params |
 | BiLSTM | Baseline | `baseline.py:239-260` | Bidirectional, non-causal |
 | Attention LSTM | Baseline | `baseline.py:263-349` | Attention over window |
-| Transformer | Baseline | `transformer.py:57-168` | Encoder-only, no mask default |
+| Transformer | Baseline | `transformer.py:57-168` | Encoder-only, **causal default** mask |
 | PINN | Physics | `pinn.py` | GBM/OU/BS/Langevin losses |
-| StackedPINN | Advanced | `stacked_pinn.py` | Encoder + parallel LSTM/GRU |
+| StackedPINN | Advanced | `stacked_pinn.py` | Encoder + parallel LSTM/GRU (attention weights logged; fusion=concat) |
 | ResidualPINN | Advanced | `stacked_pinn.py` | Base + correction path |
+| SpectralRegimePINN | Advanced | `spectral_pinn.py` | Spectral encoder + regime gate |
 | VolatilityPINN | Volatility | `volatility.py` | Variance forecast + OU/GARCH |
 | HestonPINN | Volatility | `volatility.py` | Heston SDE constraints |
+| StackedVolatilityPINN | Volatility | `volatility.py` | Encoder + RNN volatility PINN |
+| FinancialPINNBase | Advanced | `financial_dp_pinn.py` | Single-phase GBM/OU/BS with std-normalised residuals |
+| FinancialDualPhasePINN | Advanced | `financial_dp_pinn.py` | Two-phase financial PINN + intermediate continuity |
 | **BurgersPINN** | PDE | `dp_pinn.py` | Burgers' equation, autograd |
 | **DualPhasePINN** | PDE | `dp_pinn.py` | Two-phase for stiff PDEs |
 
@@ -680,13 +939,13 @@ At low viscosity (ν ≈ 0.003), the solution develops steep gradients (shocks) 
 | Component | Implementation | Evaluation Pipeline | Issues |
 |-----------|----------------|---------------------|--------|
 | Baseline Models (5) | ✅ REAL | ⚠️ PENDING | Rerun with proper epochs |
-| PINN Models (7) | ✅ REAL | ⚠️ PENDING | Physics scale fixes needed |
-| Advanced PINN (3) | ✅ REAL | ⚠️ PENDING | Rerun with proper epochs |
-| Volatility Models (6) | ✅ REAL | ⚠️ PENDING | Target verification needed |
+| PINN Models (7) | ✅ REAL | ⚠️ PENDING | Physics scaling applied; rerun epochs |
+| Advanced PINN (5) | ✅ REAL | ⚠️ PENDING | Rerun with proper epochs |
+| Volatility Models (6) | ✅ REAL | ⚠️ PENDING | Target verification assertions added; rerun/validate |
 | Burgers/DP-PINN (2) | ✅ REAL | ⚠️ PENDING | Evaluation protocol needed |
-| Physics Losses | ✅ REAL | ⚠️ PENDING | Denormalisation needed |
+| Physics Losses | ✅ REAL | ✅ SCALE FIXED | Denorm BS; residual std + RMS logged |
 | Learnable Parameters | ✅ REAL | ✅ OK | Verified with gradients |
-| Metrics (30+) | ✅ REAL | ⚠️ PENDING | Unclipped storage needed |
+| Metrics (30+) | ✅ REAL | ⚠️ PARTIAL | Sharpe/Sortino raw stored; extend raw metrics |
 | Visualizations (23+) | ✅ REAL | ✅ OK | — |
 | Training Service | ✅ HAS_SRC=True | ✅ OK | Real training enabled |
 
@@ -724,8 +983,10 @@ At low viscosity (ν ≈ 0.003), the solution develops steep gradients (shocks) 
 | 20 | `stacked_vol_pinn` | StackedVolatilityPINN | volatility | `src/models/volatility.py` | REAL |
 | 21 | `burgers_pinn` | BurgersPINN | pde | `src/models/dp_pinn.py:40-260` | REAL |
 | 22 | `dual_phase_pinn` | DualPhasePINN | pde | `src/models/dp_pinn.py:280-510` | REAL |
+| 23 | `financial_pinn` | FinancialPINNBase | advanced | `src/models/financial_dp_pinn.py` | REAL |
+| 24 | `financial_dp_pinn` | FinancialDualPhasePINN | advanced | `src/models/financial_dp_pinn.py` | REAL |
 
-**Total: 22 distinct model classes (26+ with aliases)**
+**Total: 24 distinct model classes (28+ with aliases)**
 
 ### 9.3 Physics Lambda Configurations
 
@@ -739,6 +1000,8 @@ At low viscosity (ν ≈ 0.003), the solution develops steep gradients (shocks) 
 | global | 0.05 | 0.05 | 0.03 | 0.02 | All constraints |
 | stacked | 0.1 | 0.1 | 0.0 | 0.0 | Physics encoder |
 | residual | 0.1 | 0.1 | 0.0 | 0.0 | Correction path |
+| financial_pinn | 0.1 | 0.1 | 0.05 | 0.0 | Std-normalised residuals; BS autograd |
+| financial_dp_pinn | 0.1 | 0.1 | 0.05 | 0.0 | +λ_ic, λ_intermediate continuity |
 
 ### 9.4 Learnable Physics Parameters
 
@@ -1090,29 +1353,29 @@ print('✓ Financial metrics computed successfully')
 
 | # | Item | Status | File(s) | Action |
 |---|------|--------|---------|--------|
-| 1 | **De-standardise before trading metrics** | ⬜ PENDING | `metrics.py`, `financial_metrics.py` | Add assertion: fail if std(prices) < 1 (z-scores) |
+| 1 | **De-standardise before trading metrics** | ✅ DONE | `financial_metrics.py` | Require scaler + fail-fast assertions |
 | 2 | **Position lag enforced** | ✅ DONE | `financial_metrics.py:1164-1166` | Verified: `positions[1:] = raw_signal[:-1]` |
-| 3 | **Store unclipped metrics** | ⬜ PENDING | `financial_metrics.py` | Add `sharpe_ratio_raw`, `sortino_ratio_raw` to results |
-| 4 | **Transformer masked by default** | ⬜ PENDING | `transformer.py` | Add `causal=True` default parameter |
-| 5 | **Separate causal/oracle leaderboards** | ⬜ PENDING | `leaderboard.py` | Add `is_causal` flag to results schema |
+| 3 | **Store unclipped metrics** | ✅ DONE | `financial_metrics.py` | `*_raw` stored alongside display |
+| 4 | **Transformer masked by default** | ✅ DONE | `transformer.py` | `causal=True` default with auto-mask |
+| 5 | **Separate causal/oracle leaderboards** | ✅ DONE | `leaderboard.py` | Causal-only default; oracle opt-in |
 
 ### 15.2 Physics Losses (Fix Mixed Scales)
 
 | # | Item | Status | File(s) | Action |
 |---|------|--------|---------|--------|
-| 6 | **Denormalise V,S before BS** | ⬜ PENDING | `pinn.py:181-266` | Pass scaler mean/std, denorm in autograd |
-| 7 | **Standardise GBM/OU/Langevin residuals** | ⬜ PENDING | `pinn.py:361-421` | Divide by running std |
-| 8 | **Log residual RMS per epoch** | ⬜ PENDING | `trainer.py` | Add to training history |
-| 9 | **Document λ schedule** | ⬜ PENDING | This file | Constant vs warm-up? |
+| 6 | **Denormalise V,S before BS** | ✅ DONE | `pinn.py:181-266` | Pass scaler mean/std, denorm in autograd |
+| 7 | **Standardise GBM/OU/Langevin residuals** | ✅ DONE | `pinn.py:361-421` | Divide by running std |
+| 8 | **Log residual RMS per epoch** | ✅ DONE | `pinn.py` loss_dict; still add trainer hook | Exposed via loss_dict RMS keys |
+| 9 | **Document λ schedule** | ✅ DONE | This file | Constant schedule (warm-up TBD) |
 
 ### 15.3 Results Reproducibility
 
 | # | Item | Status | File(s) | Action |
 |---|------|--------|---------|--------|
-| 10 | **Config hash in results** | ⬜ PENDING | `trainer.py` | SHA256 of training config |
-| 11 | **Scaler info in results** | ⬜ PENDING | `train_models.py` | Store μ, σ per ticker |
-| 12 | **Causal flag in results** | ⬜ PENDING | Results schema | `is_causal: bool` |
-| 13 | **Execution assumption** | ⬜ PENDING | Results schema | `execution: "close_to_close"` |
+| 10 | **Config hash in results** | ✅ DONE | `train_models.py` | SHA256 of training config stored |
+| 11 | **Scaler info in results** | ✅ DONE | `train_models.py` | Stores μ, σ per ticker |
+| 12 | **Causal flag in results** | ⚠️ PARTIAL | Results schema | `is_causal: bool` stored as default True; oracle tagging pending |
+| 13 | **Execution assumption** | ✅ DONE | Results schema | `execution: "close_to_close"` stored |
 | 14 | **Random seed logged** | ✅ DONE | `research_config` | seed=42 |
 
 ### 15.4 Model Training
@@ -1121,7 +1384,7 @@ print('✓ Financial metrics computed successfully')
 |---|------|--------|---------|--------|
 | 15 | **epochs=100 for all** | ⬜ PENDING | `train_models.py` | Currently many at epochs=1 |
 | 16 | **BiLSTM labelled oracle** | ⬜ PENDING | Results/UI | Don't compare directly to causal |
-| 17 | **Volatility target verified** | ⬜ PENDING | `dataset.py` | Check variance_history alignment |
+| 17 | **Volatility target verified** | ✅ DONE | `train_models.py` | Alignment/NaN assertions on physics metadata |
 
 ### 15.5 DP-PINN Experiments
 
@@ -1192,26 +1455,26 @@ else:
 ```
 EVALUATION PIPELINE:
   [x] Positions lagged by 1 step (implemented)
-  [ ] Prices de-standardised before metrics (PENDING)
-  [ ] Unclipped metrics stored alongside clipped (PENDING)
-  [ ] Assertion fails if z-scores passed to trading metrics (PENDING)
+  [x] Prices de-standardised before metrics enforced with scaler requirement
+  [~] Unclipped metrics stored alongside clipped (Sharpe/Sortino done; extend others)
+  [x] Assertion fails if z-scores passed to trading metrics
 
 MODEL CLASSIFICATION:
-  [ ] Causal models clearly separated from oracle models (PENDING)
-  [ ] BiLSTM and unmasked Transformer labelled as "oracle/non-causal" (PENDING)
-  [ ] Transformer default changed to causal=True (PENDING)
+  [x] Causal models separated from oracle in leaderboards (causal-only default)
+  [~] BiLSTM and unmasked Transformer labelled oracle in docs; results tagging partial
+  [x] Transformer default changed to causal=True
 
 PHYSICS LOSSES:
-  [ ] BS residual uses denormalised V,S (PENDING)
-  [ ] GBM/OU/Langevin residuals standardised (PENDING)
-  [ ] Residual RMS logged per epoch (PENDING)
-  [ ] λ schedule documented (PENDING)
+  [x] BS residual uses denormalised V,S with scaler guard
+  [x] GBM/OU/Langevin residuals standardised
+  [x] Residual RMS logged per epoch (loss_dict)
+  [x] λ schedule documented (constant)
 
 RESULTS INTEGRITY:
   [ ] All models trained for 100 epochs (PENDING)
-  [ ] Config hash stored with results (PENDING)
-  [ ] Scaler parameters stored with results (PENDING)
-  [ ] Execution assumptions documented (PENDING)
+  [x] Config hash stored with results
+  [x] Scaler parameters stored with results (per ticker)
+  [x] Execution assumptions documented (close-to-close, cost, lag)
 
 DP-PINN:
   [ ] Grid/sampling parameters logged (PENDING)

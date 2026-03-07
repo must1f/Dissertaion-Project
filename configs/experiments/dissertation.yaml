@@ -1,0 +1,101 @@
+name: dissertation_research_pipeline
+expected_model_count: 25
+
+groups:
+  baseline_forecasting_models:
+    - lstm
+    - gru
+    - bilstm
+    - attention_lstm
+    - transformer
+  physics_informed_price_models:
+    - baseline_pinn
+    - gbm
+    - ou
+    - black_scholes
+    - gbm_ou
+    - global
+  advanced_pinn_architectures:
+    - stacked
+    - residual
+    - spectral_pinn
+  volatility_forecasting_models:
+    - vol_lstm
+    - vol_gru
+    - vol_transformer
+    - vol_pinn
+    - heston_pinn
+    - stacked_vol_pinn
+  dual_phase_financial_pinn_models:
+    - financial_pinn
+    - financial_dp_pinn
+    - adaptive_dual_phase_pinn
+  pde_benchmark_models:
+    - burgers_pinn
+    - dual_phase_pinn
+
+causal_models:
+  - lstm
+  - gru
+  - attention_lstm
+  - transformer
+  - baseline_pinn
+  - gbm
+  - ou
+  - black_scholes
+  - gbm_ou
+  - global
+  - stacked
+  - residual
+  - spectral_pinn
+  - vol_lstm
+  - vol_gru
+  - vol_transformer
+  - vol_pinn
+  - heston_pinn
+  - stacked_vol_pinn
+  - financial_pinn
+  - financial_dp_pinn
+  - adaptive_dual_phase_pinn
+  - burgers_pinn
+  - dual_phase_pinn
+
+oracle_models:
+  - bilstm
+
+ranking_metric: sharpe_ratio
+comparison_metrics:
+  - sharpe_ratio
+  - rmse
+  - directional_accuracy
+
+training_contract:
+  epochs: 100
+  learning_rate: 0.001
+  batch_size: 32
+  sequence_length: 30
+  seed: 42
+  dataset_split:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+
+evaluation_contract:
+  require_destandardization: true
+  require_position_lag: true
+  require_price_scale_returns: true
+  require_clipped_and_unclipped_metrics: true
+
+artifacts:
+  results_dir: results
+  output_root: results/dissertation_pipeline
+  db_path: results/experiments.db
+  top_n_per_plot: 6
+
+result_aliases:
+  financial_dp_pinn:
+    - financial_dp_pinn
+    - financial_dual_phase_pinn
+  dual_phase_pinn:
+    - dual_phase_pinn
+    - dp_pinn

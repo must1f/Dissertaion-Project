@@ -538,6 +538,28 @@ class DataPreprocessor:
 
         return train_df, val_df, test_df
 
+    def fit_scalers_train_only(self, train_df: pd.DataFrame, feature_cols: List[str]):
+        """Fit per-ticker scalers on training data only (no leakage)."""
+        self.scalers = {}
+        for ticker, grp in train_df.groupby('ticker'):
+            sc = StandardScaler()
+            sc.fit(grp[feature_cols])
+            self.scalers[ticker] = sc
+        return self.scalers
+
+    def transform_with_scalers(self, df: pd.DataFrame, feature_cols: List[str]) -> pd.DataFrame:
+        """Transform using previously fitted scalers; raise if missing (prevents refit on val/test)."""
+        if not self.scalers:
+            raise ValueError("Scalers must be fitted on training data before transforming other splits.")
+
+        df = df.copy()
+        for ticker, grp in df.groupby('ticker'):
+            if ticker not in self.scalers:
+                raise ValueError(f"No scaler fitted for ticker {ticker}; ensure training split included it.")
+            sc = self.scalers[ticker]
+            df.loc[grp.index, feature_cols] = sc.transform(grp[feature_cols])
+        return df
+
     def process_and_store(
         self,
         df: pd.DataFrame,

@@ -329,7 +329,8 @@ class ResultsDatabase:
         self,
         metric: RankingMetric,
         ascending: bool = None,
-        limit: int = 20
+        limit: int = 20,
+        include_oracle: bool = False
     ) -> pd.DataFrame:
         """
         Get experiments ranked by a metric.
@@ -353,9 +354,12 @@ class ResultsDatabase:
         order = "ASC" if ascending else "DESC"
         metric_col = metric.value
 
+        causal_filter = "" if include_oracle else "AND is_causal = 1"
+
         query = f"""
             SELECT * FROM experiments
             WHERE {metric_col} IS NOT NULL
+            {causal_filter}
             ORDER BY {metric_col} {order}
             LIMIT {limit}
         """
@@ -475,7 +479,8 @@ class LeaderboardGenerator:
         self,
         metric: RankingMetric,
         top_n: int = 10,
-        include_regime: bool = False
+        include_regime: bool = False,
+        include_oracle: bool = False
     ) -> Leaderboard:
         """
         Generate a leaderboard for a specific metric.
@@ -488,7 +493,7 @@ class LeaderboardGenerator:
         Returns:
             Leaderboard object
         """
-        df = self.db.get_ranked(metric, limit=top_n)
+        df = self.db.get_ranked(metric, limit=top_n, include_oracle=include_oracle)
 
         entries = []
         for idx, row in df.iterrows():
@@ -518,7 +523,7 @@ class LeaderboardGenerator:
             generated_at=datetime.now().isoformat(),
             n_experiments=len(df),
             best_entry=best,
-            description=f"Top {top_n} models by {metric.value}"
+            description=f"Top {top_n} models by {metric.value} ({'all' if include_oracle else 'causal-only'})"
         )
 
     def generate_comparison_table(

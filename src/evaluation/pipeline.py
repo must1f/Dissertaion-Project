@@ -21,6 +21,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -137,6 +138,16 @@ class EvaluationPipeline:
         actual_returns: np.ndarray,
         model_name: str = "Model",
         timestamps: Optional[np.ndarray] = None,
+        scaler_mean: Optional[float] = None,
+        scaler_std: Optional[float] = None,
+        predictions_are_returns: bool = True,
+        save_structured_result: bool = True,
+        is_causal: bool = True,
+        allow_oracle: bool = False,
+        train_loss: Optional[np.ndarray] = None,
+        val_loss: Optional[np.ndarray] = None,
+        predicted_prices: Optional[np.ndarray] = None,
+        actual_prices: Optional[np.ndarray] = None,
     ) -> PipelineResult:
         """Run full evaluation for a single model.
 
@@ -158,6 +169,10 @@ class EvaluationPipeline:
         predictions = np.asarray(predictions).flatten()
         actual_returns = np.asarray(actual_returns).flatten()
 
+        # Guard against oracle models in causal-only evaluations
+        if not is_causal and not allow_oracle:
+            raise ValueError("Oracle models require allow_oracle=True when evaluating for leaderboards")
+
         # 1. Signal → Position → Net Returns
         strat_config = StrategyConfig(
             strategy=self.config.strategy,
@@ -178,8 +193,13 @@ class EvaluationPipeline:
             targets=actual_returns,
             risk_free_rate=self.config.risk_free_rate,
             periods_per_year=self.config.periods_per_year,
-            predictions_are_returns=True,
+            predictions_are_returns=predictions_are_returns,
+            validate_price_scale=not predictions_are_returns,
+            price_scale_context=f"pipeline:{model_name}",
         )
+
+        # Compute equity curve for structured artefacts
+        equity_curve = FinancialMetrics.cumulative_returns(net_returns)
 
         # 3. Generate plots
         plot_paths: List[Path] = []
@@ -195,6 +215,10 @@ class EvaluationPipeline:
                 timestamps=timestamps,
                 rolling_window=self.config.rolling_sharpe_window,
                 n_quantiles=self.config.n_quantiles,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                predicted_prices=predicted_prices,
+                actual_prices=actual_prices,
             )
 
         result = PipelineResult(
@@ -209,6 +233,33 @@ class EvaluationPipeline:
             trading_stats=trading_stats,
             plot_paths=plot_paths,
         )
+
+        # Persist structured result for reproducibility
+        if save_structured_result:
+            out_dir = self.config.output_dir / model_name.lower().replace(" ", "_")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            cfg = asdict(self.config)
+            if isinstance(cfg.get("output_dir"), Path):
+                cfg["output_dir"] = str(cfg["output_dir"])
+            payload = {
+                "model_name": model_name,
+                "strategy": self.config.strategy,
+                "config": cfg,
+                "metrics": metrics,
+                "trading_stats": trading_stats,
+                "predictions": predictions.tolist(),
+                "actual_returns": actual_returns.tolist(),
+                "net_returns": net_returns.tolist(),
+                "positions": positions.tolist(),
+                "equity_curve": equity_curve.tolist(),
+                "timestamps": timestamps.tolist() if timestamps is not None else None,
+                "scaler_mean": scaler_mean,
+                "scaler_std": scaler_std,
+                "is_causal": is_causal,
+            }
+            result_path = out_dir / "structured_result.json"
+            result_path.write_text(json.dumps(payload, indent=2))
+            result.plot_paths.append(result_path)
 
         # Log summary
         logger.info(

@@ -86,13 +86,23 @@ class ModelRegistry:
             })
         return output
 
+    def get_canonical_models(self) -> Dict[str, ModelInfo]:
+        """
+        Get canonical models only (exclude alias keys).
+
+        Canonical entries are those where dict key equals `model_info.model_key`.
+        """
+        return {k: v for k, v in self.models.items() if k == v.model_key}
+
     def get_causal_models(self) -> Dict[str, ModelInfo]:
-        """Get only causal (forecasting) models - no look-ahead bias"""
-        return {k: v for k, v in self.models.items() if v.is_causal}
+        """Get only causal canonical models (forecasting, no look-ahead bias)."""
+        canonical = self.get_canonical_models()
+        return {k: v for k, v in canonical.items() if v.is_causal}
 
     def get_oracle_models(self) -> Dict[str, ModelInfo]:
-        """Get oracle (non-causal) models - may use future context"""
-        return {k: v for k, v in self.models.items() if not v.is_causal}
+        """Get oracle canonical models (non-causal, may use future context)."""
+        canonical = self.get_canonical_models()
+        return {k: v for k, v in canonical.items() if not v.is_causal}
 
     def _define_all_models(self) -> Dict[str, ModelInfo]:
         """Define all available models in the system"""
@@ -274,8 +284,8 @@ class ModelRegistry:
             model_name='Volatility PINN',
             model_type='volatility',
             architecture='VolatilityPINN',
-            description='PINN with variance mean-reversion and GARCH constraints',
-            physics_constraints={'lambda_ou': 0.1, 'lambda_garch': 0.1, 'lambda_feller': 0.05, 'lambda_leverage': 0.05}
+            description='PINN with variance mean-reversion, GARCH, optional Heston drift, Feller, leverage',
+            physics_constraints={'lambda_ou': 0.1, 'lambda_garch': 0.1, 'lambda_feller': 0.05, 'lambda_leverage': 0.05, 'lambda_heston': 0.0, 'enable_heston_constraint': False}
         )
 
         models['heston_pinn'] = ModelInfo(
@@ -323,10 +333,30 @@ class ModelRegistry:
             physics_constraints={'lambda_gbm': 0.1, 'lambda_ou': 0.1, 'lambda_bs': 0.05, 'lambda_intermediate': 10.0}
         )
 
+        models['financial_dual_phase_pinn'] = ModelInfo(
+            model_key='financial_dual_phase_pinn',
+            model_name='Financial Dual-Phase PINN (temporal split)',
+            model_type='advanced',
+            architecture='FinancialDualPhasePINN',
+            description='Two-phase PINN with fixed temporal split, OU mean-reversion, optional GBM drift, continuity penalty',
+            physics_constraints={'lambda_gbm': 0.05, 'lambda_ou': 0.1, 'lambda_bs': 0.02, 'lambda_intermediate': 5.0}
+        )
+
+        models['adaptive_dual_phase_pinn'] = ModelInfo(
+            model_key='adaptive_dual_phase_pinn',
+            model_name='Adaptive Financial Dual-Phase PINN',
+            model_type='advanced',
+            architecture='AdaptiveFinancialDualPhasePINN',
+            description='Dynamic regime-aware dual-phase PINN with volatility gate and continuity regulariser',
+            physics_constraints={'lambda_gbm': 0.05, 'lambda_ou': 0.1, 'lambda_bs': 0.02, 'lambda_intermediate': 5.0}
+        )
+
         # Financial DP-PINN aliases
         models['fin_pinn'] = models['financial_pinn']
         models['fin_dp_pinn'] = models['financial_dp_pinn']
         models['financial_dual_phase'] = models['financial_dp_pinn']
+        models['financial_dual_phase_pinn_alias'] = models['financial_dual_phase_pinn']
+        models['financial_dual_phase_pinn_v2'] = models['financial_dual_phase_pinn']
 
         # Check training status for all models
         self._update_training_status(models)
@@ -766,7 +796,9 @@ class ModelRegistry:
                     lambda_ou=physics.get('lambda_ou', 0.1),
                     lambda_garch=physics.get('lambda_garch', 0.1),
                     lambda_feller=physics.get('lambda_feller', 0.05),
-                    lambda_leverage=physics.get('lambda_leverage', 0.05)
+                    lambda_leverage=physics.get('lambda_leverage', 0.05),
+                    lambda_heston=physics.get('lambda_heston', 0.0),
+                    enable_heston_constraint=physics.get('enable_heston_constraint', False)
                 )
 
             elif architecture == 'HestonPINN':
@@ -826,6 +858,40 @@ class ModelRegistry:
                     num_layers=num_layers,
                     dropout=dropout,
                     phase_split=0.6,
+                    config=config,
+                )
+
+            elif architecture == 'AdaptiveFinancialDualPhasePINN':
+                from .financial_dp_pinn import AdaptiveFinancialDualPhasePINN, FinancialPhysicsConfig
+                config = FinancialPhysicsConfig(
+                    lambda_gbm=physics.get('lambda_gbm', 0.05),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.02),
+                    lambda_intermediate=physics.get('lambda_intermediate', 5.0),
+                )
+                return AdaptiveFinancialDualPhasePINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    phase_split=0.5,
+                    config=config,
+                 )
+
+            elif architecture == 'AdaptiveFinancialDualPhasePINN':
+                from .financial_dp_pinn import AdaptiveFinancialDualPhasePINN, FinancialPhysicsConfig
+                config = FinancialPhysicsConfig(
+                    lambda_gbm=physics.get('lambda_gbm', 0.05),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.02),
+                    lambda_intermediate=physics.get('lambda_intermediate', 5.0),
+                )
+                return AdaptiveFinancialDualPhasePINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    phase_split=0.5,
                     config=config,
                 )
 
@@ -1057,6 +1123,56 @@ class ModelRegistry:
                     lambda_leverage=physics.get('lambda_leverage', 0.05)
                 )
 
+            # ========== FINANCIAL DUAL-PHASE PINN ARCHITECTURES ==========
+            elif architecture == 'FinancialPINNBase':
+                from .financial_dp_pinn import FinancialPINNBase, FinancialPhysicsConfig
+                config = FinancialPhysicsConfig(
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.05),
+                )
+                return FinancialPINNBase(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    config=config,
+                )
+
+            elif architecture == 'FinancialDualPhasePINN':
+                from .financial_dp_pinn import FinancialDualPhasePINN, FinancialPhysicsConfig
+                config = FinancialPhysicsConfig(
+                    lambda_gbm=physics.get('lambda_gbm', 0.1),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.05),
+                    lambda_intermediate=physics.get('lambda_intermediate', 10.0),
+                )
+                return FinancialDualPhasePINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    phase_split=0.6,
+                    config=config,
+                )
+
+            elif architecture == 'AdaptiveFinancialDualPhasePINN':
+                from .financial_dp_pinn import AdaptiveFinancialDualPhasePINN, FinancialPhysicsConfig
+                config = FinancialPhysicsConfig(
+                    lambda_gbm=physics.get('lambda_gbm', 0.05),
+                    lambda_ou=physics.get('lambda_ou', 0.1),
+                    lambda_bs=physics.get('lambda_bs', 0.02),
+                    lambda_intermediate=physics.get('lambda_intermediate', 5.0),
+                )
+                return AdaptiveFinancialDualPhasePINN(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    phase_split=0.5,
+                    config=config,
+                )
+
             else:
                 logger.error(f"Unknown architecture: {architecture}")
                 return None
@@ -1073,13 +1189,16 @@ class ModelRegistry:
 
     def get_summary(self) -> Dict:
         """Get summary statistics"""
-        total = len(self.models)
-        trained = len([m for m in self.models.values() if m.trained])
+        canonical = self.get_canonical_models()
+        total = len(canonical)
+        trained = len([m for m in canonical.values() if m.trained])
         untrained = total - trained
 
         by_type = {}
         for model_type in ['baseline', 'pinn', 'advanced', 'volatility']:
-            type_models = self.get_models_by_type(model_type)
+            type_models = {
+                k: v for k, v in canonical.items() if v.model_type == model_type
+            }
             by_type[model_type] = {
                 'total': len(type_models),
                 'trained': len([m for m in type_models.values() if m.trained]),

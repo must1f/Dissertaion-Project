@@ -324,12 +324,18 @@ class VolatilityPhysicsLoss(nn.Module):
         lambda_garch: float = 0.1,
         lambda_feller: float = 0.05,
         lambda_leverage: float = 0.05,
+        lambda_heston: float = 0.0,
+        enable_heston_constraint: bool = False,
         dt: float = DAILY_TIME_STEP,
         # Learnable physics parameters (initial values)
         theta_init: float = 1.0,      # OU mean reversion speed
         omega_init: float = 0.00001,  # GARCH intercept
         alpha_init: float = 0.1,      # GARCH alpha
         beta_init: float = 0.85,      # GARCH beta
+        kappa_init: float = 1.0,      # Heston mean reversion speed
+        theta_long_init: float = 0.04,  # Long-run variance
+        xi_init: float = 0.2,         # Vol-of-vol
+        rho_init: float = -0.5,       # Leverage correlation
     ):
         super().__init__()
 
@@ -337,6 +343,8 @@ class VolatilityPhysicsLoss(nn.Module):
         self.lambda_garch = lambda_garch
         self.lambda_feller = lambda_feller
         self.lambda_leverage = lambda_leverage
+        self.lambda_heston = lambda_heston
+        self.enable_heston_constraint = enable_heston_constraint
         self.dt = dt
 
         # Learnable physics parameters
@@ -345,10 +353,14 @@ class VolatilityPhysicsLoss(nn.Module):
         self.omega_raw = nn.Parameter(torch.tensor(math.log(omega_init)))
         self.alpha_raw = nn.Parameter(torch.tensor(self._logit(alpha_init)))
         self.beta_raw = nn.Parameter(torch.tensor(self._logit(beta_init)))
+        self.kappa_raw = nn.Parameter(torch.tensor(math.log(kappa_init)))
+        self.theta_long_raw = nn.Parameter(torch.tensor(math.log(theta_long_init)))
+        self.xi_raw = nn.Parameter(torch.tensor(math.log(xi_init)))
+        self.rho_raw = nn.Parameter(torch.tensor(math.atanh(max(min(rho_init, 0.999), -0.999))))
 
         logger.info(f"Volatility physics loss initialized: λ_ou={lambda_ou}, "
                    f"λ_garch={lambda_garch}, λ_feller={lambda_feller}, "
-                   f"λ_leverage={lambda_leverage}")
+                   f"λ_leverage={lambda_leverage}, λ_heston={lambda_heston}, enable_heston={enable_heston_constraint}")
 
     @staticmethod
     def _logit(p: float) -> float:
@@ -376,6 +388,26 @@ class VolatilityPhysicsLoss(nn.Module):
         """GARCH beta in (0.3, 0.95)."""
         return torch.sigmoid(self.beta_raw) * 0.65 + 0.3
 
+    @property
+    def kappa(self) -> torch.Tensor:
+        """Heston mean reversion speed κ > 0."""
+        return torch.nn.functional.softplus(self.kappa_raw)
+
+    @property
+    def theta_long(self) -> torch.Tensor:
+        """Heston long-run variance θ > 0."""
+        return torch.nn.functional.softplus(self.theta_long_raw)
+
+    @property
+    def xi(self) -> torch.Tensor:
+        """Vol-of-vol ξ > 0."""
+        return torch.nn.functional.softplus(self.xi_raw)
+
+    @property
+    def rho(self) -> torch.Tensor:
+        """Correlation ρ in (-1,1)."""
+        return torch.tanh(self.rho_raw)
+
     def get_learned_params(self) -> Dict[str, float]:
         """Get current learned physics parameter values."""
         return {
@@ -384,6 +416,10 @@ class VolatilityPhysicsLoss(nn.Module):
             'alpha': self.alpha.item(),
             'beta': self.beta.item(),
             'persistence': (self.alpha + self.beta).item(),
+            'kappa': self.kappa.item(),
+            'theta_long': self.theta_long.item(),
+            'xi': self.xi.item(),
+            'rho': self.rho.item(),
         }
 
     def ou_residual(
@@ -490,7 +526,28 @@ class VolatilityPhysicsLoss(nn.Module):
         correlation = torch.mean(returns_centered * variance_centered) / (returns_std * variance_std)
 
         # Penalize positive correlation (leverage effect should be negative)
-        return F.relu(correlation)
+        rho_penalty = torch.relu(self.rho)  # encourage negative
+        return F.relu(correlation) + rho_penalty
+
+    def heston_residual(
+        self,
+        variance_pred: torch.Tensor,
+        variance_prev: torch.Tensor,
+        dt: float,
+    ) -> torch.Tensor:
+        """Heston variance drift residual: dV/dt - κ(θ - V)."""
+        dt_t = torch.tensor(dt, device=variance_pred.device, dtype=variance_pred.dtype)
+        dV_dt = (variance_pred - variance_prev) / (dt_t + 1e-8)
+        expected = self.kappa * (self.theta_long - variance_prev)
+        residual = dV_dt - expected
+        residual_std = residual.std() + 1e-8
+        residual = residual / residual_std
+        return torch.mean(residual ** 2)
+
+    def feller_penalty_heston(self) -> torch.Tensor:
+        """Feller penalty for Heston parameters: max(0, ξ^2 - 2κθ)^2."""
+        penalty = torch.relu(self.xi ** 2 - 2 * self.kappa * self.theta_long)
+        return torch.mean(penalty ** 2)
 
     def forward(
         self,
@@ -561,11 +618,16 @@ class VolatilityPhysicsLoss(nn.Module):
             except Exception as e:
                 logger.debug(f"GARCH loss computation failed: {e}")
 
-        # Feller condition (positivity)
+        # Feller condition (positivity) and Heston Feller penalty
         if self.lambda_feller > 0:
             feller_loss = self.feller_residual(variance_pred)
             physics_loss = physics_loss + self.lambda_feller * feller_loss
             loss_dict['feller_loss'] = feller_loss.item()
+
+            if self.enable_heston_constraint or self.lambda_heston > 0:
+                feller_heston = self.feller_penalty_heston()
+                physics_loss = physics_loss + self.lambda_feller * feller_heston
+                loss_dict['feller_heston_loss'] = feller_heston.item()
 
         # Leverage effect
         if self.lambda_leverage > 0 and returns is not None:
@@ -576,6 +638,21 @@ class VolatilityPhysicsLoss(nn.Module):
                 loss_dict['leverage_loss'] = leverage_loss.item()
             except Exception as e:
                 logger.debug(f"Leverage loss computation failed: {e}")
+
+        # Optional Heston drift constraint on variance
+        if (self.enable_heston_constraint or self.lambda_heston > 0) and variance_history is not None and variance_history.shape[1] > 0:
+            try:
+                variance_prev = variance_history[:, -1:]
+                dt_val = metadata.get('dt', self.dt) if isinstance(metadata, dict) else self.dt
+                heston_loss = self.heston_residual(variance_pred, variance_prev, dt_val)
+                physics_loss = physics_loss + self.lambda_heston * heston_loss
+                loss_dict['heston_loss'] = heston_loss.item()
+                loss_dict['kappa_learned'] = self.kappa.item()
+                loss_dict['theta_long_learned'] = self.theta_long.item()
+                loss_dict['xi_learned'] = self.xi.item()
+                loss_dict['rho_learned'] = self.rho.item()
+            except Exception as e:
+                logger.debug(f"Heston loss computation failed: {e}")
 
         # Total loss
         total_loss = data_loss + physics_loss
@@ -624,6 +701,8 @@ class VolatilityPINN(nn.Module):
         lambda_garch: float = 0.1,
         lambda_feller: float = 0.05,
         lambda_leverage: float = 0.05,
+        lambda_heston: float = 0.0,
+        enable_heston_constraint: bool = False,
     ):
         super().__init__()
 
@@ -667,11 +746,13 @@ class VolatilityPINN(nn.Module):
             lambda_garch=lambda_garch,
             lambda_feller=lambda_feller,
             lambda_leverage=lambda_leverage,
+            lambda_heston=lambda_heston,
+            enable_heston_constraint=enable_heston_constraint,
         )
 
         logger.info(f"Initialized VolatilityPINN: base={base_model}, "
                    f"hidden_dim={hidden_dim}, λ_ou={lambda_ou}, "
-                   f"λ_garch={lambda_garch}")
+                   f"λ_garch={lambda_garch}, λ_heston={lambda_heston}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

@@ -1136,7 +1136,9 @@ class FinancialMetrics:
         benchmark_returns: Optional[Union[np.ndarray, pd.Series]] = None,
         risk_free_rate: float = RISK_FREE_RATE,
         periods_per_year: int = TRADING_DAYS_PER_YEAR,
-        predictions_are_returns: bool = False
+        predictions_are_returns: bool = False,
+        validate_price_scale: bool = True,
+        price_scale_context: str = "compute_all_metrics",
     ) -> Dict[str, float]:
         """
         Compute all comprehensive financial metrics
@@ -1156,9 +1158,14 @@ class FinancialMetrics:
         """
         metrics = {}
 
-        # Return metrics
-        metrics['total_return'] = FinancialMetrics.total_return(returns)
-        metrics['annualized_return'] = FinancialMetrics.annualized_return(returns, periods_per_year)
+        # Return metrics (raw + display) — return arrays may already be clipped upstream
+        total_return_raw = FinancialMetrics.total_return(returns)
+        annualized_return_raw = FinancialMetrics.annualized_return(returns, periods_per_year)
+        metrics['total_return_raw'] = total_return_raw
+        metrics['annualized_return_raw'] = annualized_return_raw
+
+        metrics['total_return'] = total_return_raw
+        metrics['annualized_return'] = annualized_return_raw
         metrics['cumulative_return_final'] = FinancialMetrics.cumulative_returns(returns)[-1] if len(returns) > 0 else 0.0
 
         # Risk-adjusted metrics
@@ -1182,7 +1189,9 @@ class FinancialMetrics:
         max_dd = FinancialMetrics.max_drawdown(returns)
         metrics['max_drawdown'] = max_dd
         metrics['drawdown_duration'] = FinancialMetrics.drawdown_duration(returns)
-        metrics['calmar_ratio'] = FinancialMetrics.calmar_ratio(returns, periods_per_year)
+        calmar_raw = FinancialMetrics.calmar_ratio(returns, periods_per_year)
+        metrics['calmar_ratio_raw'] = calmar_raw
+        metrics['calmar_ratio'] = calmar_raw
 
         # Volatility
         if isinstance(returns, pd.Series):
@@ -1193,10 +1202,17 @@ class FinancialMetrics:
         metrics['volatility'] = float(np.std(returns_array, ddof=1) * np.sqrt(periods_per_year)) if len(returns_array) > 0 else 0.0
 
         # Trading viability metrics
-        metrics['profit_factor'] = FinancialMetrics.profit_factor(returns)
+        profit_factor_raw = FinancialMetrics.profit_factor(returns)
+        metrics['profit_factor_raw'] = profit_factor_raw
+        metrics['profit_factor'] = profit_factor_raw
 
         # Directional accuracy and signal quality
         if predictions is not None and targets is not None:
+            # Guard against accidental z-score inputs when working with price levels
+            if validate_price_scale and not predictions_are_returns:
+                assert_price_scale(np.asarray(targets), context=f"{price_scale_context}: targets")
+                assert_price_scale(np.asarray(predictions), context=f"{price_scale_context}: predictions")
+
             metrics['directional_accuracy'] = FinancialMetrics.directional_accuracy(
                 predictions, targets, are_returns=predictions_are_returns
             )
@@ -1261,6 +1277,7 @@ def compute_strategy_returns(
     volatility: np.ndarray | None = None,
     return_details: bool = False,
     validate_scale: bool = True,
+    require_price_scale: bool = True,
 ) -> np.ndarray:
     """
     Compute strategy returns from price predictions
@@ -1304,19 +1321,13 @@ def compute_strategy_returns(
     # ===== CRITICAL: VALIDATE PRICE SCALE =====
     # Ensure inputs are de-standardised before computing trading metrics
     if validate_scale and not are_returns:
-        # If price_mean/price_std provided, data will be de-standardised below
-        # Only validate if NOT auto-de-standardising
-        if price_mean is None or price_std is None:
-            # Check if actual prices look like z-scores
-            try:
-                assert_price_scale(
-                    actual_prices,
-                    context="compute_strategy_returns (actual_prices)",
-                    raise_error=True
-                )
-            except ValueError as e:
-                logger.error(str(e))
-                raise
+        # Enforce de-standardisation: either provide scalers or explicitly opt-out
+        if require_price_scale and (price_mean is None or price_std is None):
+            raise ValueError(
+                "Trading metrics require de-standardised prices. "
+                "Provide price_mean and price_std from the close-price scaler, "
+                "or set are_returns=True if inputs are already returns."
+            )
 
     # ===== CONVERT PRICES TO RETURNS =====
     if are_returns:
@@ -1324,10 +1335,27 @@ def compute_strategy_returns(
         actual_returns = np.clip(actual_prices, min_return, max_return)
         predicted_returns = np.clip(predictions, min_return, max_return)
     else:
-        # Optional de-standardisation for price inputs
+        # Mandatory de-standardisation for price inputs (unless require_price_scale=False)
         if price_mean is not None and price_std is not None:
             actual_prices = actual_prices * price_std + price_mean
             predictions = predictions * price_std + price_mean
+        elif require_price_scale:
+            raise ValueError(
+                "price_mean and price_std must be provided to de-standardise prices "
+                "before computing trading metrics."
+            )
+
+        if validate_scale:
+            assert_price_scale(
+                actual_prices,
+                context="compute_strategy_returns (actual_prices, post-denorm)",
+                raise_error=True,
+            )
+            assert_price_scale(
+                predictions,
+                context="compute_strategy_returns (predictions, post-denorm)",
+                raise_error=True,
+            )
 
         # Percentage returns: (p_t - p_{t-1}) / p_{t-1}
         actual_returns = np.zeros_like(actual_prices)

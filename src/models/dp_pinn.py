@@ -640,6 +640,23 @@ class DualPhasePINN(nn.Module):
 
         return total_loss, loss_dict
 
+    def predict_field(
+        self,
+        x_grid: torch.Tensor,
+        t_grid: torch.Tensor,
+    ) -> torch.Tensor:
+        """Generate solution field for visualization (meshgrid inputs)."""
+        x_flat = x_grid.flatten()
+        t_flat = t_grid.flatten()
+        with torch.enable_grad():
+            u_flat = self.forward(x_flat, t_flat)
+        return u_flat.view_as(x_grid)
+
+    def continuity_profile(self, x: torch.Tensor) -> torch.Tensor:
+        """Return continuity error across the phase boundary for diagnostics."""
+        with torch.no_grad():
+            return torch.sqrt(self.compute_intermediate_loss(x) + 1e-8)
+
     def freeze_phase1(self):
         """Freeze phase 1 network parameters."""
         for param in self.phase1_net.parameters():

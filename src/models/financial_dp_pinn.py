@@ -17,7 +17,7 @@ This improves accuracy for regime changes and non-stationary financial data.
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import torch
 import torch.nn as nn
@@ -70,6 +70,11 @@ class FinancialPhysicsLoss(nn.Module):
         # Residual tracking for diagnostics
         self._residual_rms = {'gbm': 0.0, 'ou': 0.0, 'bs': 0.0}
 
+        # Optional scaler to de-standardise price-based quantities
+        self.price_mean: Optional[float] = None
+        self.price_std: Optional[float] = None
+        self.normalise_residuals: bool = True
+
         logger.info(
             f"FinancialPhysicsLoss initialized: λ_gbm={self.config.lambda_gbm}, "
             f"λ_ou={self.config.lambda_ou}, λ_bs={self.config.lambda_bs}"
@@ -85,6 +90,21 @@ class FinancialPhysicsLoss(nn.Module):
         """Long-term mean."""
         return self.mu_raw
 
+    def set_scaler(self, price_mean: Optional[float], price_std: Optional[float]):
+        """Register scaler stats used to de-standardise prices for physics terms."""
+        if price_std is not None and abs(price_std) < 1e-12:
+            raise ValueError("price_std must be non-zero for physics residuals")
+        self.price_mean = price_mean
+        self.price_std = price_std
+
+    def _standardize(self, residual: torch.Tensor, key: str) -> torch.Tensor:
+        """Standardise residual magnitude to keep λ interpretable at dt=1/252."""
+        if not self.normalise_residuals:
+            return residual
+        residual_std = residual.std() + 1e-8
+        self._residual_rms[key] = float(residual_std.detach())
+        return residual / residual_std
+
     def get_learned_params(self) -> Dict[str, float]:
         """Get current learned physics parameter values."""
         return {
@@ -97,33 +117,27 @@ class FinancialPhysicsLoss(nn.Module):
         S: torch.Tensor,
         S_next: torch.Tensor,
         volatility: torch.Tensor,
+        mu_override: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Geometric Brownian Motion residual.
 
         GBM: dS = μS dt + σS dW
-        Residual: (S_next - S) / S - μ * dt (ignoring stochastic term)
-
-        We check if returns follow expected drift pattern.
+        Residual: log(S_next/S) - (μ - 0.5σ²)·dt
         """
-        # Compute log returns
-        log_returns = torch.log(S_next / (S + 1e-8))
+        log_returns = torch.log(torch.clamp(S_next / (S + 1e-8), min=1e-8))
 
-        # Expected return under GBM: μ * dt - 0.5 * σ² * dt
-        # For daily data, we estimate μ from mean return
-        mu_est = log_returns.mean()
-        sigma = volatility.mean()
+        # Drift per step estimated in log space to avoid mixing domains
+        if mu_override is None:
+            mu_step = log_returns.mean(dim=1, keepdim=True)
+        else:
+            mu_step = mu_override
 
-        # GBM residual: actual return should be close to expected
-        expected_return = mu_est - 0.5 * sigma ** 2 * self.config.dt
-        residual = log_returns - expected_return
+        expected = mu_step - 0.5 * (volatility ** 2) * self.config.dt
+        residual = (log_returns - expected) / self.config.dt
 
-        # Normalize for consistent magnitude
-        residual_std = residual.std() + 1e-8
-        residual_norm = residual / residual_std
-        self._residual_rms['gbm'] = float(residual_std.detach())
-
-        return torch.mean(residual_norm ** 2)
+        residual = self._standardize(residual, 'gbm')
+        return torch.mean(residual ** 2)
 
     def ou_residual(
         self,
@@ -146,13 +160,9 @@ class FinancialPhysicsLoss(nn.Module):
 
         # OU residual
         residual = dX_dt - theta * (mu - X)
+        residual = self._standardize(residual, 'ou')
 
-        # Normalize
-        residual_std = residual.std() + 1e-8
-        residual_norm = residual / residual_std
-        self._residual_rms['ou'] = float(residual_std.detach())
-
-        return torch.mean(residual_norm ** 2)
+        return torch.mean(residual ** 2)
 
     def black_scholes_residual(
         self,
@@ -161,6 +171,8 @@ class FinancialPhysicsLoss(nn.Module):
         dV_dS: torch.Tensor,
         d2V_dS2: torch.Tensor,
         sigma: torch.Tensor,
+        price_mean: Optional[float] = None,
+        price_std: Optional[float] = None,
     ) -> torch.Tensor:
         """
         Simplified Black-Scholes PDE residual.
@@ -171,25 +183,29 @@ class FinancialPhysicsLoss(nn.Module):
         """
         r = self.config.risk_free_rate
 
-        # Black-Scholes residual (steady-state)
+        # De-normalise if scaler provided (avoid mixing z-scores with raw σ,r)
+        price_mean = price_mean if price_mean is not None else self.price_mean
+        price_std = price_std if price_std is not None else self.price_std
+        if price_std is not None:
+            S = S * price_std + (price_mean or 0.0)
+            V = V * price_std + (price_mean or 0.0)
+
         bs_residual = (
             0.5 * sigma ** 2 * S ** 2 * d2V_dS2
             + r * S * dV_dS
             - r * V
         )
 
-        # Normalize
-        residual_std = bs_residual.std() + 1e-8
-        residual_norm = bs_residual / residual_std
-        self._residual_rms['bs'] = float(residual_std.detach())
-
-        return torch.mean(residual_norm ** 2)
+        bs_residual = self._standardize(bs_residual, 'bs')
+        return torch.mean(bs_residual ** 2)
 
     def compute_derivatives(
         self,
         model: nn.Module,
         x: torch.Tensor,
         price_idx: int = 0,
+        price_mean: Optional[float] = None,
+        price_std: Optional[float] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute derivatives using automatic differentiation.
@@ -227,6 +243,16 @@ class FinancialPhysicsLoss(nn.Module):
         )[0]
 
         d2V_dS2 = d2V_dx[:, -1, price_idx:price_idx+1]
+
+        # De-normalise outputs for price-based physics residuals when scalers are available
+        price_mean = price_mean if price_mean is not None else self.price_mean
+        price_std = price_std if price_std is not None else self.price_std
+        if price_std is not None:
+            V = V * price_std + (price_mean or 0.0)
+
+            # Chain rule adjustment for derivatives: d/dS = (1/std) d/dS_norm
+            dV_dS = dV_dS / (price_std + 1e-8)
+            d2V_dS2 = d2V_dS2 / (price_std + 1e-8)
 
         return V, dV_dS, d2V_dS2
 
@@ -307,10 +333,17 @@ class FinancialPINNBase(nn.Module):
         """
         Compute loss with financial physics constraints.
         """
-        # Data loss
+        price_mean = metadata.get('price_mean')
+        price_std = metadata.get('price_std')
+        if price_mean is not None or price_std is not None:
+            try:
+                self.physics_loss.set_scaler(price_mean, price_std)
+            except Exception as e:
+                logger.debug(f"Scaler registration failed: {e}")
+
         data_loss = nn.functional.mse_loss(predictions, targets)
 
-        loss_dict = {
+        loss_dict: Dict[str, float] = {
             'data_loss': data_loss.item(),
             'total_loss': data_loss.item(),
         }
@@ -325,7 +358,7 @@ class FinancialPINNBase(nn.Module):
         volatilities = metadata.get('volatilities')
         inputs = metadata.get('inputs')
 
-        # GBM constraint
+        # GBM constraint (weak trend prior)
         if self.config.lambda_gbm > 0 and prices is not None and prices.shape[1] > 1:
             try:
                 S = prices[:, :-1]
@@ -335,10 +368,11 @@ class FinancialPINNBase(nn.Module):
                 gbm_loss = self.physics_loss.gbm_residual(S, S_next, vol)
                 physics_loss = physics_loss + self.config.lambda_gbm * gbm_loss
                 loss_dict['gbm_loss'] = gbm_loss.item()
+                loss_dict['gbm_residual_rms'] = self.physics_loss._residual_rms.get('gbm', 0.0)
             except Exception as e:
                 logger.debug(f"GBM loss failed: {e}")
 
-        # OU constraint on returns
+        # OU constraint on returns (primary regulariser)
         if self.config.lambda_ou > 0 and returns is not None and returns.shape[1] > 1:
             try:
                 X = returns[:, :-1]
@@ -347,23 +381,27 @@ class FinancialPINNBase(nn.Module):
                 ou_loss = self.physics_loss.ou_residual(X, X_next)
                 physics_loss = physics_loss + self.config.lambda_ou * ou_loss
                 loss_dict['ou_loss'] = ou_loss.item()
+                loss_dict['ou_residual_rms'] = self.physics_loss._residual_rms.get('ou', 0.0)
+                loss_dict['theta_ou'] = float(self.physics_loss.theta.detach())
+                loss_dict['mu_ou'] = float(self.physics_loss.mu.detach())
             except Exception as e:
                 logger.debug(f"OU loss failed: {e}")
 
-        # Black-Scholes constraint
+        # Black-Scholes constraint (no-arbitrage inspired, small weight)
         if self.config.lambda_bs > 0 and inputs is not None and prices is not None:
             try:
                 V, dV_dS, d2V_dS2 = self.physics_loss.compute_derivatives(
-                    self, inputs, price_idx=0
+                    self, inputs, price_idx=0, price_mean=price_mean, price_std=price_std
                 )
                 S = prices[:, -1:]
                 sigma = volatilities[:, -1:] if volatilities is not None else torch.ones_like(S) * 0.2
 
                 bs_loss = self.physics_loss.black_scholes_residual(
-                    V, S, dV_dS, d2V_dS2, sigma
+                    V, S, dV_dS, d2V_dS2, sigma, price_mean=price_mean, price_std=price_std
                 )
                 physics_loss = physics_loss + self.config.lambda_bs * bs_loss
                 loss_dict['bs_loss'] = bs_loss.item()
+                loss_dict['bs_residual_rms'] = self.physics_loss._residual_rms.get('bs', 0.0)
             except Exception as e:
                 logger.debug(f"BS loss failed: {e}")
 
@@ -403,6 +441,7 @@ class FinancialDualPhasePINN(nn.Module):
         self.output_dim = output_dim
         self.phase_split = phase_split
         self.config = config or FinancialPhysicsConfig()
+        self._forward_cache: Dict[str, Any] = {}
 
         # Phase 1 network (handles earlier data)
         self.phase1_net = FinancialPINNBase(
@@ -429,76 +468,34 @@ class FinancialDualPhasePINN(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, phase: Optional[int] = None) -> torch.Tensor:
-        """
-        Forward pass.
+        """Forward pass supporting per-phase evaluation and cached diagnostics."""
+        batch_size, seq_len, _ = x.shape
+        split_idx = max(2, min(seq_len - 1, int(seq_len * self.phase_split)))
+        split_tensor = torch.tensor(split_idx, device=x.device)
 
-        Args:
-            x: Input tensor [batch, seq_len, features]
-            phase: Optional phase selection (1 or 2). If None, uses both.
-        """
         if phase == 1:
-            return self.phase1_net(x)
-        elif phase == 2:
-            return self.phase2_net(x)
-        else:
-            # Ensemble both phases (weighted average)
-            out1 = self.phase1_net(x)
-            out2 = self.phase2_net(x)
-            return 0.5 * (out1 + out2)
+            return self.phase1_net(x[:, :split_idx, :])
+        if phase == 2:
+            return self.phase2_net(x[:, split_idx - 1:, :])
 
-    def compute_phase1_loss(
-        self,
-        predictions: torch.Tensor,
-        targets: torch.Tensor,
-        metadata: Dict,
-        initial_value: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        Compute loss for phase 1 with initial condition constraint.
-        """
-        # Base physics loss
-        total_loss, loss_dict = self.phase1_net.compute_loss(
-            predictions, targets, metadata, enable_physics=True
-        )
+        x_phase1 = x[:, :split_idx, :]
+        x_phase2 = x[:, split_idx - 1:, :]  # include boundary for continuity
 
-        # Initial condition constraint
-        if initial_value is not None:
-            ic_loss = nn.functional.mse_loss(
-                predictions[:1], initial_value[:1]
-            )
-            total_loss = total_loss + self.config.lambda_ic * ic_loss
-            loss_dict['ic_loss'] = ic_loss.item()
-            loss_dict['total_loss'] = total_loss.item()
+        phase1_pred = self.phase1_net(x_phase1)
+        phase2_pred = self.phase2_net(x_phase2)
+        combined = 0.5 * (phase1_pred + phase2_pred)
 
-        return total_loss, loss_dict
+        # Cache for loss/diagnostics
+        self._forward_cache = {
+            'split_idx': split_tensor,
+            'phase1_pred': phase1_pred,
+            'phase2_pred': phase2_pred,
+            'combined_pred': combined,
+            'phase1_input': x_phase1,
+            'phase2_input': x_phase2,
+        }
 
-    def compute_phase2_loss(
-        self,
-        predictions: torch.Tensor,
-        targets: torch.Tensor,
-        metadata: Dict,
-        phase1_predictions: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        Compute loss for phase 2 with intermediate constraint.
-
-        The intermediate constraint ensures continuity between phases.
-        """
-        # Base physics loss
-        total_loss, loss_dict = self.phase2_net.compute_loss(
-            predictions, targets, metadata, enable_physics=True
-        )
-
-        # Intermediate constraint: phase 2 start should match phase 1 end
-        if phase1_predictions is not None and len(predictions) > 0:
-            intermediate_loss = nn.functional.mse_loss(
-                predictions[:1], phase1_predictions[-1:]
-            )
-            total_loss = total_loss + self.config.lambda_intermediate * intermediate_loss
-            loss_dict['intermediate_loss'] = intermediate_loss.item()
-            loss_dict['total_loss'] = total_loss.item()
-
-        return total_loss, loss_dict
+        return combined
 
     def compute_loss(
         self,
@@ -508,64 +505,226 @@ class FinancialDualPhasePINN(nn.Module):
         enable_physics: bool = True,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Compute combined loss (for full training).
+        Compute combined loss using a fixed temporal split.
         """
-        batch_size = predictions.shape[0]
-        split_idx = int(batch_size * self.phase_split)
+        if not self._forward_cache:
+            # Ensure forward cache exists (e.g., during evaluation-only calls)
+            _ = self.forward(metadata['inputs'])
 
-        # Split data by phase
-        pred1, pred2 = predictions[:split_idx], predictions[split_idx:]
-        targ1, targ2 = targets[:split_idx], targets[split_idx:]
+        split_idx_cache = self._forward_cache.get('split_idx')
+        if split_idx_cache is None:
+            _ = self.forward(metadata['inputs'])
+            split_idx_cache = self._forward_cache.get('split_idx')
 
-        # Split metadata
-        meta1 = self._split_metadata(metadata, 0, split_idx)
-        meta2 = self._split_metadata(metadata, split_idx, batch_size)
+        if split_idx_cache is None:
+            raise RuntimeError("Forward cache missing split index for dual-phase PINN")
 
-        # Phase 1 loss
-        loss1, dict1 = self.phase1_net.compute_loss(pred1, targ1, meta1, enable_physics)
+        split_idx_tensor = torch.as_tensor(split_idx_cache)  # type: ignore[arg-type]
+        split_idx = int(split_idx_tensor.item())
 
-        # Phase 2 loss with intermediate constraint
-        loss2, dict2 = self.phase2_net.compute_loss(pred2, targ2, meta2, enable_physics)
+        phase1_pred = self._forward_cache.get('phase1_pred')
+        phase2_pred = self._forward_cache.get('phase2_pred')
 
-        # Intermediate constraint
-        if split_idx > 0 and split_idx < batch_size:
-            intermediate_loss = nn.functional.mse_loss(
-                pred2[:1], pred1[-1:]
+        if phase1_pred is None or phase2_pred is None:
+            _ = self.forward(metadata['inputs'])
+            phase1_pred = self._forward_cache.get('phase1_pred')
+            phase2_pred = self._forward_cache.get('phase2_pred')
+            split_idx_cache = self._forward_cache.get('split_idx')
+            split_idx_tensor = torch.as_tensor(split_idx_cache)  # type: ignore[arg-type]
+            split_idx = int(split_idx_tensor.item())
+
+        assert phase1_pred is not None and phase2_pred is not None
+
+        # Align targets for both phases (both forecast next-day price)
+        phase1_data_loss = nn.functional.mse_loss(phase1_pred, targets)
+        phase2_data_loss = nn.functional.mse_loss(phase2_pred, targets)
+        data_loss = 0.5 * (phase1_data_loss + phase2_data_loss)
+
+        # Physics losses on temporally split metadata
+        meta_phase1 = self._split_metadata_time(metadata, end=split_idx)
+        meta_phase2 = self._split_metadata_time(metadata, start=max(split_idx - 1, 0))
+
+        physics_loss = torch.tensor(0.0, device=predictions.device)
+        p1_loss, dict1 = self.phase1_net.compute_loss(
+            phase1_pred, targets, meta_phase1, enable_physics
+        )
+        p2_loss, dict2 = self.phase2_net.compute_loss(
+            phase2_pred, targets, meta_phase2, enable_physics
+        )
+
+        # Remove duplicated data contribution from sub-losses
+        if enable_physics:
+            physics_loss = (
+                p1_loss - self.config.lambda_data * phase1_data_loss
+                + p2_loss - self.config.lambda_data * phase2_data_loss
             )
-            loss2 = loss2 + self.config.lambda_intermediate * intermediate_loss
-            dict2['intermediate_loss'] = intermediate_loss.item()
 
-        # Combine losses
-        total_loss = loss1 + loss2
-        loss_dict = {
-            'phase1_loss': loss1.item(),
-            'phase2_loss': loss2.item(),
+        continuity_loss = nn.functional.mse_loss(phase1_pred, phase2_pred)
+        total_loss = (
+            self.config.lambda_data * data_loss
+            + physics_loss
+            + self.config.lambda_intermediate * continuity_loss
+        )
+
+        loss_dict: Dict[str, float] = {
             'total_loss': total_loss.item(),
-            'data_loss': dict1.get('data_loss', 0) + dict2.get('data_loss', 0),
-            'physics_loss': dict1.get('physics_loss', 0) + dict2.get('physics_loss', 0),
+            'data_loss': data_loss.item(),
+            'physics_loss': physics_loss.item() if enable_physics else 0.0,
+            'continuity_loss': continuity_loss.item(),
+            'phase_split_index': float(split_idx),
+            'phase1_data_loss': phase1_data_loss.item(),
+            'phase2_data_loss': phase2_data_loss.item(),
         }
 
-        # Include individual physics losses
-        for key in ['gbm_loss', 'ou_loss', 'bs_loss']:
+        for key in ['gbm_loss', 'ou_loss', 'bs_loss', 'gbm_residual_rms', 'ou_residual_rms', 'bs_residual_rms']:
             if key in dict1 or key in dict2:
-                loss_dict[key] = dict1.get(key, 0) + dict2.get(key, 0)
+                loss_dict[key] = dict1.get(key, 0.0) + dict2.get(key, 0.0)
 
         return total_loss, loss_dict
 
-    def _split_metadata(
-        self,
-        metadata: Dict,
-        start: int,
-        end: int,
-    ) -> Dict:
-        """Split metadata tensors by index range."""
-        result = {}
+    def _split_metadata_time(self, metadata: Dict, start: Optional[int] = 0, end: Optional[int] = None) -> Dict:
+        """Temporal slice of sequence-like metadata for phase-specific physics losses."""
+        result: Dict[str, Any] = {}
+        start_idx = 0 if start is None else int(start)
+        end_idx = None if end is None else int(end)
+
         for key, value in metadata.items():
-            if isinstance(value, torch.Tensor) and value.shape[0] > 0:
-                result[key] = value[start:end]
+            if isinstance(value, torch.Tensor) and value.dim() >= 2 and value.shape[1] >= 2:
+                result[key] = value[:, start_idx:end_idx, ...]
             else:
                 result[key] = value
         return result
+
+
+class AdaptiveFinancialDualPhasePINN(FinancialDualPhasePINN):
+    """Dual-phase PINN with a learned, volatility-driven phase boundary."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 128,
+        num_layers: int = 2,
+        output_dim: int = 1,
+        dropout: float = 0.2,
+        phase_split: float = 0.5,
+        config: Optional[FinancialPhysicsConfig] = None,
+    ):
+        super().__init__(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            output_dim=output_dim,
+            dropout=dropout,
+            phase_split=phase_split,
+            config=config,
+        )
+
+        gate_hidden = max(hidden_dim // 4, 16)
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(3, gate_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(gate_hidden, 1)
+        )
+
+    def _compute_regime_score(self, x: torch.Tensor) -> torch.Tensor:
+        """Use rolling volatility and residual magnitude as regime indicator."""
+        price_feature = x[:, :, 0]
+        diffs = price_feature[:, 1:] - price_feature[:, :-1]
+        rolling_vol = diffs.std(dim=1, keepdim=True)
+        tail = max(3, min(diffs.shape[1], 10))
+        recent_vol = diffs[:, -tail:].std(dim=1, keepdim=True)
+        residual_mag = diffs.abs().mean(dim=1, keepdim=True)
+        features = torch.cat([rolling_vol, recent_vol, residual_mag], dim=-1)
+        return self.gate_mlp(features)
+
+    def forward(self, x: torch.Tensor, phase: Optional[int] = None) -> torch.Tensor:
+        if phase is not None:
+            return super().forward(x, phase=phase)
+
+        gate_logits = self._compute_regime_score(x)
+        gate = torch.sigmoid(gate_logits)  # weight for phase 1
+
+        phase1_pred = self.phase1_net(x)
+        phase2_pred = self.phase2_net(x)
+        combined = gate * phase1_pred + (1.0 - gate) * phase2_pred
+
+        self._forward_cache = {
+            'gate': gate,
+            'gate_logits': gate_logits,
+            'phase1_pred': phase1_pred,
+            'phase2_pred': phase2_pred,
+            'combined_pred': combined,
+            'split_idx': torch.tensor(int(x.shape[1] * self.phase_split), device=x.device),
+            'phase1_input': x,
+            'phase2_input': x,
+        }
+
+        return combined
+
+    def compute_loss(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        metadata: Dict,
+        enable_physics: bool = True,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        if not self._forward_cache:
+            _ = self.forward(metadata['inputs'])
+
+        gate = self._forward_cache.get('gate')
+        phase1_pred = self._forward_cache.get('phase1_pred')
+        phase2_pred = self._forward_cache.get('phase2_pred')
+
+        if gate is None or phase1_pred is None or phase2_pred is None:
+            _ = self.forward(metadata['inputs'])
+            gate = self._forward_cache.get('gate')
+            phase1_pred = self._forward_cache.get('phase1_pred')
+            phase2_pred = self._forward_cache.get('phase2_pred')
+
+        if gate is None or phase1_pred is None or phase2_pred is None:
+            raise RuntimeError("Adaptive gate not initialised before loss computation")
+
+        # Data loss weighted by gate
+        phase1_data = (gate * (phase1_pred - targets) ** 2).mean()
+        phase2_data = ((1.0 - gate) * (phase2_pred - targets) ** 2).mean()
+        data_loss = 0.5 * (phase1_data + phase2_data)
+
+        # Physics losses (shared metadata, but weighted by expected regime occupancy)
+        p1_loss, dict1 = self.phase1_net.compute_loss(
+            phase1_pred, targets, metadata, enable_physics
+        )
+        p2_loss, dict2 = self.phase2_net.compute_loss(
+            phase2_pred, targets, metadata, enable_physics
+        )
+
+        physics_loss = torch.tensor(0.0, device=predictions.device)
+        if enable_physics:
+            gate_mean = gate.mean()
+            physics_loss = gate_mean * (p1_loss - self.config.lambda_data * nn.functional.mse_loss(phase1_pred, targets))
+            physics_loss = physics_loss + (1 - gate_mean) * (p2_loss - self.config.lambda_data * nn.functional.mse_loss(phase2_pred, targets))
+
+        continuity_loss = torch.mean(gate * (1.0 - gate) * (phase1_pred - phase2_pred) ** 2)
+        total_loss = (
+            self.config.lambda_data * data_loss
+            + physics_loss
+            + self.config.lambda_intermediate * continuity_loss
+        )
+
+        loss_dict: Dict[str, float] = {
+            'total_loss': total_loss.item(),
+            'data_loss': data_loss.item(),
+            'physics_loss': physics_loss.item() if enable_physics else 0.0,
+            'continuity_loss': continuity_loss.item(),
+            'gate_mean': gate.mean().item(),
+            'gate_std': gate.std().item(),
+        }
+
+        for key in ['gbm_loss', 'ou_loss', 'bs_loss', 'gbm_residual_rms', 'ou_residual_rms', 'bs_residual_rms']:
+            if key in dict1 or key in dict2:
+                loss_dict[key] = dict1.get(key, 0.0) + dict2.get(key, 0.0)
+
+        return total_loss, loss_dict
 
     def freeze_phase1(self):
         """Freeze phase 1 network parameters."""

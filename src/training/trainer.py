@@ -10,6 +10,7 @@ from typing import Dict, Optional, Tuple, List
 from pathlib import Path
 import numpy as np
 import json
+from collections import defaultdict
 
 # tqdm is only used for progress bars; if it's missing we still want real training to run.
 try:  # pragma: no cover - defensive import guard
@@ -219,6 +220,7 @@ class Trainer:
         total_data_loss = 0.0
         total_physics_loss = 0.0
         n_batches = 0
+        component_sums: Dict[str, float] = defaultdict(float)
 
         all_predictions = []
         all_targets = []
@@ -284,6 +286,9 @@ class Trainer:
 
                     total_data_loss += loss_dict.get('data_loss', 0.0)
                     total_physics_loss += loss_dict.get('physics_loss', 0.0)
+                    for k, v in loss_dict.items():
+                        if isinstance(v, (int, float)):
+                            component_sums[k] += float(v)
 
                 else:
                     # Standard forward pass
@@ -349,6 +354,10 @@ class Trainer:
             metrics['train_data_loss'] = total_data_loss / n_batches
             metrics['train_physics_loss'] = total_physics_loss / n_batches
 
+        # Log physics components if present
+        for k, v in component_sums.items():
+            metrics[f"train_{k}"] = v / n_batches
+
         return avg_loss, metrics
 
     @torch.no_grad()
@@ -366,6 +375,7 @@ class Trainer:
         self.model.eval()
         total_loss = 0.0
         n_batches = 0
+        component_sums: Dict[str, float] = defaultdict(float)
 
         all_predictions = []
         all_targets = []
@@ -397,9 +407,12 @@ class Trainer:
                     # Add inputs for Black-Scholes autograd
                     metadata['inputs'] = sequences
 
-                    loss, _ = self.model.compute_loss(
+                    loss, loss_dict = self.model.compute_loss(
                         predictions, targets, metadata, enable_physics=enable_physics
                     )
+                    for k, v in loss_dict.items():
+                        if isinstance(v, (int, float)):
+                            component_sums[k] += float(v)
                 else:
                     # Check if model returns tuple (LSTM/GRU models)
                     model_class_name = self.model.__class__.__name__.lower()
@@ -425,6 +438,8 @@ class Trainer:
 
         metrics = calculate_metrics(all_targets, all_predictions, prefix="val_")
         metrics['val_loss'] = avg_loss
+        for k, v in component_sums.items():
+            metrics[f"val_{k}"] = v / n_batches
 
         logger.debug(f"validate_epoch() completed: avg_loss={avg_loss:.6f}, n_batches={n_batches}")
         logger.debug(f"  metrics: {metrics}")

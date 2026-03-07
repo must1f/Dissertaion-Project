@@ -70,6 +70,10 @@ class DiagnosticPlotter:
         timestamps: Optional[np.ndarray] = None,
         rolling_window: int = 63,
         n_quantiles: int = 10,
+        train_loss: Optional[np.ndarray] = None,
+        val_loss: Optional[np.ndarray] = None,
+        predicted_prices: Optional[np.ndarray] = None,
+        actual_prices: Optional[np.ndarray] = None,
     ) -> List[Path]:
         """Generate all 7 required plots and save to *output_dir*.
 
@@ -130,6 +134,22 @@ class DiagnosticPlotter:
         fig.savefig(p, dpi=self.dpi, bbox_inches="tight")
         plt.close(fig)
         paths.append(p)
+
+        # 8. Training vs validation loss (optional)
+        if train_loss is not None and val_loss is not None:
+            fig = self.plot_loss_curves(train_loss, val_loss, model_name)
+            p = output_dir / f"{prefix}_loss_curves.png"
+            fig.savefig(p, dpi=self.dpi, bbox_inches="tight")
+            plt.close(fig)
+            paths.append(p)
+
+        # 9. Predicted price vs actual price overlay (optional)
+        if predicted_prices is not None and actual_prices is not None:
+            fig = self.plot_price_overlay(predicted_prices, actual_prices, timestamps, model_name)
+            p = output_dir / f"{prefix}_price_overlay.png"
+            fig.savefig(p, dpi=self.dpi, bbox_inches="tight")
+            plt.close(fig)
+            paths.append(p)
 
         logger.info(f"Saved {len(paths)} diagnostic plots to {output_dir}")
         return paths
@@ -345,5 +365,44 @@ class DiagnosticPlotter:
         ax.set_xlabel(f"Prediction Quantile (Q1=lowest … Q{len(labels)}=highest)")
         ax.set_ylabel("Mean Realised Return (%)")
         ax.grid(True, alpha=0.3, axis="y")
+        fig.tight_layout()
+        return fig
+
+    def plot_loss_curves(
+        self,
+        train_loss: np.ndarray,
+        val_loss: np.ndarray,
+        title: str = "Model",
+    ) -> plt.Figure:
+        """Optional: Training vs validation loss curves."""
+        fig, ax = plt.subplots(figsize=self.figsize)
+        epochs = np.arange(1, len(train_loss) + 1)
+        ax.plot(epochs, train_loss, label="Train", linewidth=1.5, color="#1B998B")
+        ax.plot(epochs, val_loss, label="Val", linewidth=1.5, linestyle="--", color="#E84855")
+        ax.set_title(f"{title} — Training vs Validation Loss", fontsize=14)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
+    def plot_price_overlay(
+        self,
+        predicted_prices: np.ndarray,
+        actual_prices: np.ndarray,
+        timestamps: Optional[np.ndarray],
+        title: str = "Model",
+    ) -> plt.Figure:
+        """Optional: Predicted price vs actual price over time."""
+        fig, ax = plt.subplots(figsize=self.figsize)
+        x = timestamps if timestamps is not None else np.arange(len(actual_prices))
+        ax.plot(x, actual_prices, label="Actual", linewidth=1.5, color="#2E86AB")
+        ax.plot(x, predicted_prices, label="Predicted", linewidth=1.2, linestyle="--", color="#F59E0B")
+        ax.set_title(f"{title} — Predicted vs Actual Price", fontsize=14)
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Price")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
         fig.tight_layout()
         return fig

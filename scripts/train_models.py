@@ -33,6 +33,7 @@ import os
 import argparse
 import json
 import time
+import numbers
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
@@ -48,7 +49,7 @@ from torch.utils.data import DataLoader
 # Import training infrastructure
 from src.utils.config import get_config, get_research_config
 from src.utils.logger import get_logger
-from src.utils.reproducibility import set_seed, log_system_info, get_device
+from src.utils.reproducibility import set_seed, log_system_info, get_device, compute_config_hash
 from src.data.fetcher import DataFetcher
 from src.data.preprocessor import DataPreprocessor
 from src.data.dataset import PhysicsAwareDataset, collate_fn_with_metadata
@@ -260,10 +261,17 @@ def prepare_data(
     print(f"  Test samples: {len(test_dataset)}")
     print("=" * 70)
 
-    return train_dataset, val_dataset, test_dataset, input_dim, scalers
+    # Validate physics metadata alignment (volatility/returns/prices)
+    assert P_train.shape[:2] == X_train.shape[:2], "P_train alignment mismatch"
+    assert P_val.shape[:2] == X_val.shape[:2], "P_val alignment mismatch"
+    assert P_test.shape[:2] == X_test.shape[:2], "P_test alignment mismatch"
+    if np.isnan(P_train).any() or np.isnan(P_val).any() or np.isnan(P_test).any():
+        raise ValueError("NaNs detected in physics metadata (prices/returns/volatilities)")
+
+    return train_dataset, val_dataset, test_dataset, input_dim, scalers, feature_cols
 
 
-def _extract_close_stats(scalers: Optional[Dict[str, any]]) -> Tuple[Optional[float], Optional[float]]:
+def _extract_close_stats(scalers: Optional[Dict[str, Any]]) -> Tuple[Optional[float], Optional[float]]:
     """
     Extract mean and std for the close price scaler when available.
 
@@ -284,11 +292,34 @@ def _extract_close_stats(scalers: Optional[Dict[str, any]]) -> Tuple[Optional[fl
     return mean_val, std_val
 
 
+def _extract_close_scaler_map(
+    scalers: Optional[Dict[str, Any]],
+    feature_cols: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, float]]:
+    """Return per-ticker close mean/std when available."""
+    if not scalers or not isinstance(scalers, dict):
+        return {}
+    close_idx = 0
+    if feature_cols and "close" in feature_cols:
+        close_idx = feature_cols.index("close")
+    out: Dict[str, Dict[str, float]] = {}
+    for ticker_name, sc in scalers.items():
+        mean = getattr(sc, "mean_", None)
+        std = getattr(sc, "scale_", None)
+        if mean is None or std is None:
+            continue
+        mean_val = float(np.squeeze(mean[close_idx])) if hasattr(mean, "shape") else float(mean)
+        std_val = float(np.squeeze(std[close_idx])) if hasattr(std, "shape") else float(std)
+        out[ticker_name] = {"close_mean": mean_val, "close_std": std_val}
+    return out
+
+
 def compute_all_evaluation_metrics(
     predictions: np.ndarray,
     targets: np.ndarray,
     model_name: str,
-    scalers: Optional[Dict[str, any]] = None,
+    scalers: Optional[Dict[str, Any]] = None,
+    feature_cols: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Compute comprehensive evaluation metrics including prediction and financial metrics.
@@ -323,41 +354,47 @@ def compute_all_evaluation_metrics(
     })
 
     # Financial metrics
-    try:
-        strategy_returns = compute_strategy_returns(
-            predictions=predictions,
-            actual_prices=targets,
-            are_returns=False,  # derive returns from price levels
-            transaction_cost=TRANSACTION_COST,
-            price_mean=price_mean,
-            price_std=price_std,
-        )
+    if price_mean is not None and price_std is not None:
+        pm = float(price_mean)
+        ps = float(price_std)
+        try:
+            strategy_returns = compute_strategy_returns(
+                predictions=predictions,
+                actual_prices=targets,
+                are_returns=False,  # derive returns from price levels
+                transaction_cost=TRANSACTION_COST,
+                price_mean=pm,
+                price_std=ps,
+                require_price_scale=True,
+            )
 
-        fin_metrics = calculate_financial_metrics(
-            returns=strategy_returns,
-            risk_free_rate=RISK_FREE_RATE,
-            periods_per_year=TRADING_DAYS_PER_YEAR,
-            prefix=""
-        )
+            fin_metrics = calculate_financial_metrics(
+                returns=strategy_returns,
+                risk_free_rate=RISK_FREE_RATE,
+                periods_per_year=TRADING_DAYS_PER_YEAR,
+                prefix=""
+            )
 
-        metrics.update({
-            "sharpe_ratio": fin_metrics.get("sharpe_ratio"),
-            "sortino_ratio": fin_metrics.get("sortino_ratio"),
-            "max_drawdown": fin_metrics.get("max_drawdown"),
-            "calmar_ratio": fin_metrics.get("calmar_ratio"),
-            "total_return": fin_metrics.get("total_return"),
-            "volatility": fin_metrics.get("volatility"),
-            "win_rate": fin_metrics.get("win_rate"),
-        })
+            metrics.update({
+                "sharpe_ratio": fin_metrics.get("sharpe_ratio"),
+                "sortino_ratio": fin_metrics.get("sortino_ratio"),
+                "max_drawdown": fin_metrics.get("max_drawdown"),
+                "calmar_ratio": fin_metrics.get("calmar_ratio"),
+                "total_return": fin_metrics.get("total_return"),
+                "volatility": fin_metrics.get("volatility"),
+                "win_rate": fin_metrics.get("win_rate"),
+            })
 
-        # Annualized return
-        if len(strategy_returns) > 0:
-            metrics["annualized_return"] = FinancialMetrics.annualized_return(
-                strategy_returns, periods_per_year=TRADING_DAYS_PER_YEAR
-            ) * 100
+            # Annualized return
+            if len(strategy_returns) > 0:
+                metrics["annualized_return"] = FinancialMetrics.annualized_return(
+                    strategy_returns, periods_per_year=TRADING_DAYS_PER_YEAR
+                ) * 100
 
-    except Exception as e:
-        logger.warning(f"Failed to compute financial metrics for {model_name}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to compute financial metrics for {model_name}: {e}")
+    else:
+        logger.warning("Skipping financial metrics: close price scaler stats unavailable (multi-ticker or missing scaler)")
 
     return metrics
 
@@ -377,6 +414,8 @@ def train_single_model(
     research_mode: bool = True,
     save_checkpoint: bool = True,
     device: Optional[torch.device] = None,
+    scalers: Optional[Dict[str, Any]] = None,
+    feature_cols: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Train a single model.
@@ -499,6 +538,8 @@ def train_single_model(
         'data_loss': [],
         'physics_loss': [],
         'learning_rates': [],
+        'train_components': [],
+        'val_components': [],
     }
 
     best_val_loss = float('inf')
@@ -515,6 +556,14 @@ def train_single_model(
         history['data_loss'].append(train_details.get('data_loss'))
         history['physics_loss'].append(train_details.get('physics_loss'))
         history['learning_rates'].append(trainer.optimizer.param_groups[0]['lr'])
+
+        component_snapshot = {k: v for k, v in train_details.items() if k.startswith('train_') and isinstance(v, (int, float))}
+        if component_snapshot:
+            history['train_components'].append(component_snapshot)
+
+        val_component_snapshot = {k: v for k, v in val_details.items() if k.startswith('val_') and isinstance(v, (int, float))}
+        if val_component_snapshot:
+            history['val_components'].append(val_component_snapshot)
 
         # Log progress
         if epoch % 10 == 0 or epoch == 1:
@@ -544,8 +593,20 @@ def train_single_model(
         predictions,
         targets,
         model_type,
-        scalers=scalers
+        scalers=scalers,
+        feature_cols=feature_cols,
     )
+
+    scaler_map = _extract_close_scaler_map(scalers, feature_cols)
+
+    config_hash = compute_config_hash({
+        'hidden_dim': hidden_dim,
+        'num_layers': num_layers,
+        'dropout': dropout,
+        'batch_size': batch_size,
+        'epochs': epochs,
+        'learning_rate': learning_rate,
+    })
 
     print(f"\nTest Metrics for {model_type}:")
     print(f"  RMSE: {test_metrics.get('rmse', 'N/A'):.6f}")
@@ -566,6 +627,15 @@ def train_single_model(
         'epochs_trained': epochs,
         'training_completed': True,
         'research_mode': research_mode,
+        'is_causal': True,
+        'config_hash': config_hash,
+        'execution_assumptions': {
+            'execution_model': 'close_to_close',
+            'transaction_cost': TRANSACTION_COST,
+            'position_lag': 1,
+            'slippage': 0.0,
+        },
+        'scaler_params': scaler_map,
         'config': {
             'hidden_dim': hidden_dim,
             'num_layers': num_layers,
@@ -586,9 +656,9 @@ def train_single_model(
             return {k: convert_to_python(v) for k, v in obj.items()}
         elif isinstance(obj, list):
             return [convert_to_python(v) for v in obj]
-        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        elif isinstance(obj, numbers.Integral):
             return int(obj)
-        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        elif isinstance(obj, numbers.Real) and not isinstance(obj, bool):
             return float(obj)
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
@@ -625,7 +695,7 @@ def train_multiple_models(
     """
     # Prepare data once
     print("\nPreparing data for batch training...")
-    train_dataset, val_dataset, test_dataset, input_dim, scalers = prepare_data(
+    train_dataset, val_dataset, test_dataset, input_dim, scalers, feature_cols = prepare_data(
         research_mode=research_mode,
     )
 
@@ -645,6 +715,8 @@ def train_multiple_models(
                 input_dim=input_dim,
                 epochs=epochs,
                 research_mode=research_mode,
+                scalers=scalers,
+                feature_cols=feature_cols,
                 **kwargs
             )
             results[model_type] = result
@@ -678,9 +750,9 @@ def train_multiple_models(
             return {k: convert_to_python(v) for k, v in obj.items()}
         elif isinstance(obj, list):
             return [convert_to_python(v) for v in obj]
-        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        elif isinstance(obj, numbers.Integral):
             return int(obj)
-        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        elif isinstance(obj, numbers.Real) and not isinstance(obj, bool):
             return float(obj)
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
@@ -879,7 +951,7 @@ def main():
     # Train
     if len(models_to_train) == 1:
         # Single model training
-        train_dataset, val_dataset, test_dataset, input_dim, scalers = prepare_data(
+        train_dataset, val_dataset, test_dataset, input_dim, scalers, feature_cols = prepare_data(
             research_mode=research_mode,
             force_refresh=args.force_refresh,
         )
@@ -891,6 +963,8 @@ def main():
             input_dim=input_dim,
             epochs=args.epochs,
             research_mode=research_mode,
+            scalers=scalers,
+            feature_cols=feature_cols,
             **kwargs
         )
     else:

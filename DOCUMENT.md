@@ -31,6 +31,13 @@
 42. [Colab Notebook Metrics & Data Prep Updates](#42-colab-notebook-metrics--data-prep-updates-2026-03-05)
 43. [Colab S&P 500 Data & Metrics Audit](#43-colab-sp-500-data--metrics-audit-2026-03-05)
 44. [MODEL.md Dissertation-Ready Review](#44-modelmd-dissertation-ready-review-2026-03-05)
+45. [Complete Model Gallery Refresh](#45-complete-model-gallery-refresh-2026-03-07)
+46. [Financial PINNs & Causal Transformer Docs](#46-financial-pinns--causal-transformer-docs-2026-03-07)
+47. [Evaluation Enforcement & Physics Scaling Fixes](#47-evaluation-enforcement--physics-scaling-fixes-2026-03-07)
+46. [Financial DP-PINN Colab Coverage](#46-financial-dp-pinn-colab-coverage-2026-03-07)
+45. [Complete Model Gallery Refresh](#45-complete-model-gallery-refresh-2026-03-07)
+48. [Evaluation Integrity Hardening](#48-evaluation-integrity-hardening-2026-03-07)
+49. [Dual-Phase Financial PINNs & Physics Audit](#49-dual-phase-financial-pinns--physics-audit-2026-03-07)
 
 ---
 
@@ -6637,3 +6644,182 @@ All 6 test categories must pass before producing dissertation results.
 - BiLSTM results should NOT be compared directly with forecasting models
 - Sharpe ratios > 5 should be investigated using the raw values
 - Physics loss magnitudes should be checked using residual RMS diagnostics
+
+---
+
+## 45. Complete Model Gallery Refresh (2026-03-07)
+
+### Overview
+- Extended `model.md` to cover every registered model family (baseline, PINN variants, advanced PINNs, volatility models, and PDE models) with explicit outputs and λ/physics coverage.
+- Added Mermaid diagrams for BiLSTM, Attention LSTM, PINN variants, advanced PINNs (Stacked/Residual/Spectral), and the full volatility stack so each registry key now has a graph, not just ASCII.
+
+### Changes Made
+1. **File**: `model.md`
+   - Added complete gallery section with output summary table and per-family diagrams, including new graphs for BiLSTM, Attention LSTM, SpectralRegimePINN, and all volatility PINNs.
+   - Reiterated λ sets for each PINN price variant and mapped outputs for price, variance, and PDE models.
+
+### Files Modified
+| File | Changes |
+|------|---------|
+| `model.md` | Added full registry gallery with diagrams, outputs, and λ tables |
+
+### Verification
+- Manual cross-check: confirmed all 24 registry keys are now represented with outputs and architecture graphs in `model.md`.
+
+---
+
+## 46. Financial PINNs & Causal Transformer Docs (2026-03-07)
+
+### Overview
+- Updated `model.md` to reflect the current implementations: Transformer now defaults to causal masking, and the newly added FinancialPINNBase and FinancialDualPhasePINN architectures are documented with outputs, physics weights, and residual normalisation behaviour.
+
+### Changes Made
+1. **File**: `model.md`
+   - Added Financial PINN sections (single-phase and dual-phase) describing LSTM backbone, λ settings (GBM/OU/BS), residual std normalisation, and phase continuity terms.
+   - Included financial models in the registry gallery, outputs-at-a-glance, λ tables, and summary/registry counts (now 24 classes).
+   - Updated Transformer documentation and causality classification to match the code (`causal=True` by default; oracle requires `causal=False`).
+
+### Files Modified
+| File | Changes |
+|------|---------|
+| `model.md` | Added Financial PINNs, causal Transformer default, registry/λ updates |
+
+### Verification
+- Manual cross-check against `src/models/model_registry.py` and `src/models/transformer.py` to ensure counts, causality flags, and architectures align with implementations.
+
+---
+
+## 47. Evaluation Enforcement & Physics Scaling Fixes (2026-03-07)
+
+### Overview
+- Enforced mandatory de-standardisation before trading metrics with fail-fast guards, and required scalers for price inputs unless returns are explicitly passed.
+- Tightened causal/oracle separation in leaderboards (causal-only default) and expanded physics fixes (price-space μ for GBM, denorm V,S in BS residual, Langevin temperature used via diffusion consistency, residual RMS logging, λ-weighted logging).
+
+### Changes Made
+1. **File**: `src/evaluation/financial_metrics.py`
+   - Added `require_price_scale` defaulting to True; raised on missing scaler when prices are used; post-denorm scale assertions; enforced de-standardisation before metrics.
+2. **File**: `src/evaluation/leaderboard.py`
+   - Leaderboards default to causal-only entries (`is_causal=1`), optional inclusion of oracle models via flag.
+3. **File**: `src/models/pinn.py`
+   - GBM drift uses price-space μ; BS residual requires non-zero scaler and de-normalises V,S; residual std logging extended; Langevin temperature now used via diffusion-consistency residual; λ-weighted physics losses logged; lambda schedule marked constant.
+4. **File**: `model.md`
+   - Updated audit date, clarified BS as steady-state regulariser, GBM μ in price space, de-normalised BS residual, Transformer causal-by-default, StackedPINN fusion is concat with attention logging only.
+5. **File**: `scripts/train_models.py`
+   - Added per-ticker scaler μ/σ export, config hashes, execution assumptions, and guarded financial metrics to require scalers; added physics metadata alignment/NaN assertions for volatility targets.
+
+### Verification
+- Static review of updated functions; no long trainings executed. Trading metrics now fail fast without scalers when using prices.
+
+---
+
+## 46. Financial DP-PINN Colab Coverage (2026-03-07)
+
+### Overview
+- Ensured the Google Colab training notebook runs the financial PINN and financial dual-phase PINN with real physics losses and includes them in all summaries/plots.
+- Added a helper to gate training on the financial DP-PINN module so runs fail fast if dependencies are missing.
+
+### Changes Made
+1. **File**: `Jupyter/Colab_All_Models.ipynb`
+   - Added `train_financial_dp_model` wrapper that forces physics-enabled training and reuses research-mode parameters.
+   - Included financial DP-PINN models in the price model group, aggregate results (`price_results`), metrics audit, and final training report counts.
+   - Wired new cells (`#@title 11c` and `#@title 11d`) to save per-model JSON outputs and feed existing plots/CSVs alongside other price models.
+
+### Verification
+- Execute the Colab notebook end-to-end; new cells should produce `financial_pinn_results.json`, `financial_dp_pinn_results.json`, and include both models in `price_model_summary.csv`, `price_training_curves.png`, and the final report counts.
+
+---
+
+## 48. Evaluation Integrity Hardening (2026-03-07)
+
+### Overview
+- Hardened the evaluation pipeline against z-score misuse, captured raw vs clipped metrics explicitly, enforced causal masking/lag semantics, and emitted structured results for reproducibility.
+
+### Changes Made
+1. **File**: `src/evaluation/financial_metrics.py`
+   - Added raw outputs (`total_return_raw`, `annualized_return_raw`, `calmar_ratio_raw`, `profit_factor_raw`).
+   - Guarded `compute_all_metrics` against z-score price inputs when operating on price levels.
+2. **File**: `src/evaluation/pipeline.py`
+   - Saved structured results (predictions, returns, positions, equity curve, metrics) per model to `structured_result.json`.
+   - Propagated validation flags into metric computation; stored equity curve for downstream diagnostics.
+   - Added causal/oracle gate (`is_causal`, `allow_oracle`) and propagated optional loss/price series into diagnostics.
+3. **Tests**: `tests/test_strategy_engine_lag.py`, `tests/test_scaling_assertions.py`, `tests/test_transformer_causal_mask.py`
+   - Regression coverage for 1-period lag correctness, z-score rejection, and Transformer causal mask.
+4. **Tests**: `tests/test_split_manager_validation.py`, `tests/test_pipeline_oracle_guard.py`
+   - Validates sequence windows respect split lengths; enforces oracle evaluation opt-in.
+4. **Script**: `scripts/verify_evaluation_integrity.py`
+   - Quick verification of causal masks, price-scale guards, and lagged trading; writes `results/evaluation_integrity.json`.
+5. **File**: `src/evaluation/plot_diagnostics.py`
+   - Added optional training/validation loss curves and predicted-vs-actual price overlays to the diagnostic suite.
+6. **File**: `src/data/preprocessor.py`
+   - Introduced `fit_scalers_train_only` and `transform_with_scalers` helpers to prevent scaler refits on val/test splits.
+7. **File**: `src/evaluation/split_manager.py`
+   - Added `validate_sequence_boundaries` to guard against sequence windows crossing split boundaries; walk-forward now requires explicit validator factory.
+
+### Verification
+- `pytest tests/test_strategy_engine_lag.py tests/test_scaling_assertions.py tests/test_transformer_causal_mask.py tests/test_split_manager_validation.py tests/test_pipeline_oracle_guard.py`
+- `python scripts/verify_evaluation_integrity.py`
+
+---
+
+## 49. Volatility PINN Heston Drift & BS Scaling (2026-03-07)
+
+### Overview
+- Added optional Heston drift residual, Feller penalty, and leverage guardrails to `VolatilityPINN`, with learnable κ, θ, ξ, ρ constrained to financially valid ranges.
+- Improved Black-Scholes residual scaling in price PINN to ensure derivatives use de-normalised units via chain-rule scaling.
+- Exposed new λ/enable flags via model registry; per-epoch physics components now logged through trainer history.
+
+### Changes Made
+1. **Files**: `src/models/volatility.py`, `src/models/model_registry.py`
+   - Added `lambda_heston`, `enable_heston_constraint`, and learnable κ/θ/ξ/ρ with softplus/tanh constraints; Heston drift residual, Feller penalty for Heston params, leverage penalty uses ρ; loss dict logs components and parameters.
+   - Registry passes new lambdas/flags; VolatilityPINN description updated.
+2. **File**: `src/models/pinn.py`
+   - Black-Scholes autograd residual now applies chain-rule scaling (1/σ_std, 1/σ_std²) for dV/dS and d²V/dS² to avoid mixed units.
+3. **File**: `src/training/trainer.py`, `scripts/train_models.py`
+   - Physics loss components averaged per epoch and stored in training history and results snapshots.
+4. **Tests**: `tests/test_vol_pinn_heston.py`
+   - Backward/finite loss for VolatilityPINN with Heston residual; parameter constraints checked; BS residual smoke test; registry creation smoke test.
+
+### Verification
+- `python -m compileall scripts/train_models.py src/evaluation/financial_metrics.py src/evaluation/leaderboard.py src/models/pinn.py`
+- `python -m pytest tests/test_vol_pinn_heston.py`
+
+---
+
+## 49. Dual-Phase Financial PINNs & Physics Audit (2026-03-07)
+
+### Overview
+Implemented upgraded dual-phase architectures for financial forecasting with physics-consistent losses, added adaptive gating for regime-aware phase selection, refreshed GBM/OU/BS residuals for dimensional consistency, and exposed continuity diagnostics for Burgers’ benchmarks to support dissertation experiments and visualisations.
+
+### Changes Made
+1. **Financial dual-phase backbones** (`src/models/financial_dp_pinn.py`)
+   - Reworked `FinancialDualPhasePINN` to split sequences temporally, cache phase outputs, enforce continuity between phases, and log residual RMS plus learned OU parameters.
+   - Added `AdaptiveFinancialDualPhasePINN` with volatility/residual-driven gating, blending phase experts dynamically and penalising transition disagreement.
+   - Refactored `FinancialPhysicsLoss` to compute GBM drift in log-return space, prioritise OU mean reversion, de-standardise prices for Black–Scholes residuals, and standardise residual magnitudes for dt = 1/252 stability.
+2. **Physics loss audit** (`src/models/pinn.py`)
+   - GBM residual now uses log-price dynamics with residual standardisation; OU/Langevin diagnostics preserved; Black–Scholes continues to run on de-normalised prices.
+3. **Model registry integration** (`src/models/model_registry.py`)
+   - Registered `financial_dual_phase_pinn` and `adaptive_dual_phase_pinn` with physics defaults and continuity weights, wiring instantiation paths for training/evaluation.
+4. **Burgers’ dual-phase diagnostics** (`src/models/dp_pinn.py`)
+   - Added `predict_field` for meshgrid heatmaps and `continuity_profile` to report boundary errors, enabling heatmap/error/L2/continuity plots in the PDE evaluation pipeline.
+
+### Verification
+- Instantiate new models via the registry to confirm wiring and physics defaults:
+  ```bash
+  python - <<'PY'
+  from pathlib import Path
+  from src.models.model_registry import ModelRegistry
+  registry = ModelRegistry(Path('.'))
+  for key in ['financial_dual_phase_pinn', 'adaptive_dual_phase_pinn']:
+      m = registry.create_model(key, input_dim=5, hidden_dim=64, num_layers=2, dropout=0.1)
+      print(key, '->', m.__class__.__name__)
+  PY
+  ```
+- (Optional) Run the model integrity probe from `CLAUDE.md` to exercise all price PINNs and verify physics losses execute with real networks.
+
+### Files Modified
+| File | Changes |
+|------|---------|
+| `src/models/financial_dp_pinn.py` | Added adaptive/fixed dual-phase PINNs, physics loss overhaul, continuity-aware loss logic, diagnostics |
+| `src/models/pinn.py` | GBM residual moved to log space with residual standardisation and diagnostics |
+| `src/models/model_registry.py` | Registered new financial dual-phase variants and instantiation paths |
+| `src/models/dp_pinn.py` | Added field prediction and continuity profile helpers for Burgers visualisations |

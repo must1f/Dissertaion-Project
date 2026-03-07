@@ -4,6 +4,7 @@ from .baseline import LSTMModel, GRUModel, BiLSTMModel
 from .transformer import TransformerModel
 from .pinn import PINNModel, PhysicsLoss
 from .dp_pinn import BurgersPINN, DualPhasePINN, create_burgers_pinn
+from .financial_dp_pinn import FinancialDualPhasePINN, AdaptiveFinancialDualPhasePINN, FinancialPINNBase
 
 __all__ = [
     "LSTMModel",
@@ -16,4 +17,8 @@ __all__ = [
     "BurgersPINN",
     "DualPhasePINN",
     "create_burgers_pinn",
+    # Financial dual-phase PINNs
+    "FinancialPINNBase",
+    "FinancialDualPhasePINN",
+    "AdaptiveFinancialDualPhasePINN",
 ]

@@ -10,7 +10,7 @@ Embeds quantitative finance equations into the loss function:
 
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Union
 import math
 
 from ..utils.logger import get_logger
@@ -84,12 +84,15 @@ class PhysicsLoss(nn.Module):
         self.price_mean = price_mean
         self.price_std = price_std
         self.normalise_residuals = normalise_residuals
+        # Lambda schedule (currently constant; warm-up not implemented yet)
+        self.lambda_schedule = "constant"
 
         # Track residual magnitudes for diagnostics
         self._residual_rms = {
             'gbm': 0.0,
             'ou': 0.0,
             'langevin': 0.0,
+            'langevin_diffusion': 0.0,
             'black_scholes': 0.0
         }
 
@@ -149,6 +152,7 @@ class PhysicsLoss(nn.Module):
             'gbm_residual_rms': self._residual_rms.get('gbm', 0.0),
             'ou_residual_rms': self._residual_rms.get('ou', 0.0),
             'langevin_residual_rms': self._residual_rms.get('langevin', 0.0),
+            'langevin_diffusion_rms': self._residual_rms.get('langevin_diffusion', 0.0),
             'bs_residual_rms': self._residual_rms.get('black_scholes', 0.0)
         }
 
@@ -169,34 +173,41 @@ class PhysicsLoss(nn.Module):
     def gbm_residual(
         self,
         S: torch.Tensor,
-        dS_dt: torch.Tensor,
-        mu: torch.Tensor,
-        sigma: torch.Tensor
+        S_next: torch.Tensor,
+        sigma: torch.Tensor,
+        mu_override: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Geometric Brownian Motion residual: dS/dt - μS - σS·dW
+        Geometric Brownian Motion residual in **log-price space**.
+
+        This avoids mixing price-space and log-return dynamics. We compare the
+        observed log return to a drift term μ·dt (optionally provided) and
+        normalise by the running standard deviation to keep λ coefficients
+        stable when dt=1/252.
 
         Args:
-            S: Stock price
-            dS_dt: Time derivative of S (approximated)
-            mu: Drift parameter
-            sigma: Volatility parameter
-
-        Returns:
-            GBM residual (normalised for dimensional consistency)
+            S: Current prices
+            S_next: Next-step prices
+            sigma: Volatility tensor (same shape as S)
+            mu_override: Optional drift to use instead of empirical drift
         """
-        # GBM equation: dS = μS dt + σS dW
-        # Residual: dS/dt - μS (we can't directly model dW)
-        residual = dS_dt - mu * S
+        # Log-return over one step (dimensionless and numerically stable)
+        log_ret = torch.log(torch.clamp(S_next / (S + 1e-8), min=1e-8))
 
-        # ===== NORMALISE RESIDUAL FOR DIMENSIONAL CONSISTENCY =====
-        # This prevents residuals from being inflated by dt=1/252
+        # Empirical drift per step (log space); keep dimensionally consistent
+        if mu_override is None:
+            mu_step = log_ret.mean(dim=1, keepdim=True)
+        else:
+            mu_step = mu_override
+
+        expected = mu_step - 0.5 * (sigma ** 2) * self.dt
+        residual = (log_ret - expected) / self.dt
+
         if self.normalise_residuals:
             residual_std = residual.std() + 1e-8
             residual = residual / residual_std
             self._residual_rms['gbm'] = float(residual_std.detach())
 
-        # L2 loss on residual
         return torch.mean(residual ** 2)
 
     def black_scholes_residual(
@@ -285,6 +296,12 @@ class PhysicsLoss(nn.Module):
         if price_std is None:
             price_std = self.price_std
 
+        if price_std is None or float(price_std) == 0.0:
+            raise ValueError("price_std must be provided and non-zero for Black-Scholes residual")
+
+        price_mean_t = torch.as_tensor(price_mean, device=x.device, dtype=x.dtype)
+        price_std_t = torch.as_tensor(price_std, device=x.device, dtype=x.dtype)
+
         # Clone input and enable gradient tracking
         x_grad = x.clone().detach().requires_grad_(True)
 
@@ -301,8 +318,8 @@ class PhysicsLoss(nn.Module):
 
         # ===== DE-NORMALISE S AND V FOR DIMENSIONAL CONSISTENCY =====
         # Black-Scholes requires real price levels, not z-scores
-        S = S_norm * price_std + price_mean
-        V = V_norm * price_std + price_mean
+        S = S_norm * price_std_t + price_mean_t
+        V = V_norm * price_std_t + price_mean_t
 
         # Ensure sigma has correct shape
         if sigma.dim() == 0:
@@ -323,9 +340,8 @@ class PhysicsLoss(nn.Module):
 
         # Extract gradient w.r.t. price feature at last timestep
         dV_dS_norm = dV_dx[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
-        # Chain rule: dV/dS = (dV_norm/dS_norm) * (price_std / price_std) = dV_norm/dS_norm
-        # Since V = V_norm * std + mean, dV/dS_norm = std, so dV/dS = dV_norm/dS_norm
-        dV_dS = dV_dS_norm
+        # Chain rule: dV/dS = (dV_norm/dS_norm) / price_std
+        dV_dS = dV_dS_norm / (price_std_t + 1e-8)
 
         # ========== COMPUTE SECOND DERIVATIVE d²V/dS² via AUTOGRAD ==========
         d2V_dx = torch.autograd.grad(
@@ -337,8 +353,8 @@ class PhysicsLoss(nn.Module):
         )[0]
 
         d2V_dS2_norm = d2V_dx[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
-        # Chain rule: d²V/dS² scales with 1/std
-        d2V_dS2 = d2V_dS2_norm / (price_std + 1e-8)
+        # Chain rule: d²V/dS² scales with 1/std²
+        d2V_dS2 = d2V_dS2_norm / ((price_std_t + 1e-8) ** 2)
 
         # ========== BLACK-SCHOLES PDE RESIDUAL ==========
         # Simplified steady-state form (without ∂V/∂t):
@@ -416,13 +432,21 @@ class PhysicsLoss(nn.Module):
         # Langevin equation: dX/dt = -γ∇U(X) + noise
         residual = dX_dt + gamma * grad_U
 
-        # ===== NORMALISE RESIDUAL FOR DIMENSIONAL CONSISTENCY =====
+        # Diffusion-consistency residual: target diffusion magnitude sqrt(2γT)
+        diffusion_target = torch.sqrt(torch.clamp(2.0 * gamma * T, min=1e-8))
+        diffusion_residual = torch.abs(dX_dt) - diffusion_target
+
+        # ===== NORMALISE RESIDUALS FOR DIMENSIONAL CONSISTENCY =====
         if self.normalise_residuals:
             residual_std = residual.std() + 1e-8
             residual = residual / residual_std
             self._residual_rms['langevin'] = float(residual_std.detach())
 
-        return torch.mean(residual ** 2)
+            diffusion_std = diffusion_residual.std() + 1e-8
+            diffusion_residual = diffusion_residual / diffusion_std
+            self._residual_rms['langevin_diffusion'] = float(diffusion_std.detach())
+
+        return torch.mean(residual ** 2 + diffusion_residual ** 2)
 
     def forward(
         self,
@@ -466,15 +490,13 @@ class PhysicsLoss(nn.Module):
             try:
                 S = prices[:, :-1]  # Current prices
                 S_next = prices[:, 1:]  # Next prices
-                dS_dt = (S_next - S) / self.dt  # Approximate derivative
-
-                # Estimate drift and volatility from returns
-                mu = returns.mean(dim=1, keepdim=True)
                 sigma = volatilities[:, :-1]
 
-                gbm_loss = self.gbm_residual(S, dS_dt, mu, sigma)
+                # Optional drift override remains in log space for consistency
+                gbm_loss = self.gbm_residual(S, S_next, sigma, mu_override=None)
                 physics_loss = physics_loss + self.lambda_gbm * gbm_loss
                 loss_dict['gbm_loss'] = gbm_loss.item()
+                loss_dict['gbm_loss_weighted'] = (self.lambda_gbm * gbm_loss).item()
 
             except Exception as e:
                 logger.debug(f"GBM loss computation failed: {e}")
@@ -495,6 +517,7 @@ class PhysicsLoss(nn.Module):
                 ou_loss = self.ornstein_uhlenbeck_residual(X, dX_dt, theta, mu, sigma)
                 physics_loss = physics_loss + self.lambda_ou * ou_loss
                 loss_dict['ou_loss'] = ou_loss.item()
+                loss_dict['ou_loss_weighted'] = (self.lambda_ou * ou_loss).item()
                 loss_dict['theta_learned'] = theta.item()  # Log learned value
 
             except Exception as e:
@@ -518,6 +541,7 @@ class PhysicsLoss(nn.Module):
                 langevin_loss = self.langevin_residual(X, dX_dt, grad_U, gamma, T)
                 physics_loss = physics_loss + self.lambda_langevin * langevin_loss
                 loss_dict['langevin_loss'] = langevin_loss.item()
+                loss_dict['langevin_loss_weighted'] = (self.lambda_langevin * langevin_loss).item()
                 loss_dict['gamma_learned'] = gamma.item()  # Log learned values
                 loss_dict['temperature_learned'] = T.item()
 
@@ -633,7 +657,7 @@ class PINNModel(nn.Module):
         self,
         x: torch.Tensor,
         return_hidden: bool = False
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
         """
         Forward pass through base model
 
@@ -718,6 +742,7 @@ class PINNModel(nn.Module):
                 # Add to total loss
                 total_loss = total_loss + self.physics_loss.lambda_bs * bs_loss
                 loss_dict['bs_loss'] = bs_loss.item()
+                loss_dict['bs_loss_weighted'] = (self.physics_loss.lambda_bs * bs_loss).item()
                 loss_dict['total_loss'] = total_loss.item()
 
                 logger.debug(f"Black-Scholes autograd loss: {bs_loss.item():.6f}")

@@ -3,10 +3,10 @@
     "model_name": "lstm",
     "path": "/Users/mustif/Documents/GitHub/Dissertaion-Project/checkpoints/lstm_best.pt",
     "metrics": {
-      "val_loss": 6.78300679383318
+      "val_loss": 0.2711988091468811
     },
     "regime": null,
-    "git_commit": "a96f2d9c7c67722638984128a7fef38c0745a4e0"
+    "git_commit": "343b27f794c9c29e6d701f1ebcc70d1778d6b58f"
   },
   "gru_seed42": {
     "model_name": "gru",

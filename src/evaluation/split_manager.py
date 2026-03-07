@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Callable, Any
 
 from ..utils.logger import get_logger
 
@@ -78,11 +78,38 @@ class SplitManager:
 
         return train_indices, val_indices, test_indices
 
+    def validate_sequence_boundaries(
+        self,
+        train_indices: np.ndarray,
+        val_indices: np.ndarray,
+        test_indices: np.ndarray,
+        sequence_length: int,
+        forecast_horizon: int,
+    ) -> bool:
+        """Ensure sequences/windows do not cross split boundaries."""
+        window = sequence_length + forecast_horizon
+        if len(train_indices) < window or len(val_indices) < window or len(test_indices) < window:
+            raise ValueError("Window (sequence_length + forecast_horizon) exceeds split length; adjust splits or window.")
+        max_train = train_indices.max() if len(train_indices) else -1
+        min_val = val_indices.min() if len(val_indices) else 0
+        min_test = test_indices.min() if len(test_indices) else 0
+
+        # Last index used by a train window
+        last_train_usage = max_train
+        if last_train_usage >= min_val:
+            raise ValueError("Train sequences overlap validation boundary; adjust sequence_length or split ratios.")
+
+        last_val_usage = val_indices.max() if len(val_indices) else min_test
+        if last_val_usage >= min_test:
+            raise ValueError("Validation sequences overlap test boundary; adjust sequence_length or split ratios.")
+
+        return True
+
     def create_walk_forward_splits(
         self,
         n_samples: int,
         timestamps: Optional[pd.DatetimeIndex] = None,
-        validator_factory=None
+        validator_factory: Optional[Callable[..., Any]] = None
     ) -> List[Tuple[np.ndarray, np.ndarray]]:
         """
         Create walk-forward validation splits.
@@ -91,6 +118,9 @@ class SplitManager:
             List of (train_indices, test_indices) tuples
         """
         method = 'anchored' if self.config.strategy == SplitStrategy.EXPANDING else 'rolling'
+
+        if validator_factory is None:
+            raise ValueError("validator_factory must be provided for walk-forward splits")
 
         validator = validator_factory(
             method=method,
@@ -114,4 +144,3 @@ class SplitManager:
     @property
     def split_hash(self) -> Optional[str]:
         return self._split_hash
-
