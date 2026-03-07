@@ -57,6 +57,12 @@ class PositionalEncoding(nn.Module):
 class TransformerModel(nn.Module):
     """
     Transformer model for time series forecasting
+
+    IMPORTANT: For causal forecasting (no look-ahead bias), set causal=True (default).
+    This applies a causal attention mask that prevents each position from attending
+    to future positions, making the model suitable for real-time prediction.
+
+    For oracle/analysis purposes where future context is acceptable, set causal=False.
     """
 
     def __init__(
@@ -68,7 +74,8 @@ class TransformerModel(nn.Module):
         dim_feedforward: int = 512,
         dropout: float = 0.2,
         output_dim: int = 1,
-        max_len: int = 5000
+        max_len: int = 5000,
+        causal: bool = True  # CRITICAL: Default to causal for forecasting
     ):
         """
         Initialize Transformer model
@@ -82,12 +89,15 @@ class TransformerModel(nn.Module):
             dropout: Dropout probability
             output_dim: Output dimension
             max_len: Maximum sequence length for positional encoding
+            causal: If True (default), apply causal mask to prevent look-ahead bias.
+                   Set to False only for oracle/analysis models.
         """
         super(TransformerModel, self).__init__()
 
         self.input_dim = input_dim
         self.d_model = d_model
         self.nhead = nhead
+        self.causal = causal  # Store causal mode
 
         # Ensure d_model is divisible by nhead
         assert d_model % nhead == 0, f"d_model ({d_model}) must be divisible by nhead ({nhead})"
@@ -140,7 +150,8 @@ class TransformerModel(nn.Module):
 
         Args:
             x: Input tensor (batch_size, sequence_length, input_dim)
-            src_mask: Optional attention mask
+            src_mask: Optional attention mask. If None and causal=True,
+                     a causal mask is automatically generated.
             src_key_padding_mask: Optional padding mask
 
         Returns:
@@ -151,6 +162,13 @@ class TransformerModel(nn.Module):
 
         # Add positional encoding
         x = self.pos_encoder(x)
+
+        # ===== CAUSAL MASK FOR FORECASTING =====
+        # When causal=True and no explicit mask provided, generate causal mask
+        # This prevents each position from attending to future positions
+        if src_mask is None and self.causal:
+            seq_len = x.size(1)
+            src_mask = self.generate_square_subsequent_mask(seq_len, x.device)
 
         # Transformer encoder
         transformer_out = self.transformer_encoder(

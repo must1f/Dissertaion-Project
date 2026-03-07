@@ -45,6 +45,10 @@ class ModelInfo:
     checkpoint_path: Optional[Path] = None
     training_date: Optional[str] = None
     epochs_trained: Optional[int] = None
+    # Causal vs Oracle classification for scientific validity
+    # Causal models only use past information; Oracle models may use future context
+    is_causal: bool = True  # Default to causal (safe assumption)
+    model_category: str = "forecasting"  # "forecasting" (causal) or "oracle" (non-causal)
 
 
 class ModelRegistry:
@@ -76,8 +80,19 @@ class ModelRegistry:
                 'results_path': str(info.results_path) if info.results_path else None,
                 'training_date': info.training_date,
                 'epochs_trained': info.epochs_trained,
+                # Causal vs Oracle classification
+                'is_causal': info.is_causal,
+                'model_category': info.model_category,
             })
         return output
+
+    def get_causal_models(self) -> Dict[str, ModelInfo]:
+        """Get only causal (forecasting) models - no look-ahead bias"""
+        return {k: v for k, v in self.models.items() if v.is_causal}
+
+    def get_oracle_models(self) -> Dict[str, ModelInfo]:
+        """Get oracle (non-causal) models - may use future context"""
+        return {k: v for k, v in self.models.items() if not v.is_causal}
 
     def _define_all_models(self) -> Dict[str, ModelInfo]:
         """Define all available models in the system"""
@@ -106,7 +121,9 @@ class ModelRegistry:
             model_name='Bidirectional LSTM',
             model_type='baseline',
             architecture='BiLSTM',
-            description='Bidirectional LSTM for forward and backward context'
+            description='Bidirectional LSTM for forward and backward context',
+            is_causal=False,  # ORACLE: Uses future context via backward pass
+            model_category='oracle'
         )
 
         models['attention_lstm'] = ModelInfo(
@@ -122,7 +139,9 @@ class ModelRegistry:
             model_name='Transformer',
             model_type='baseline',
             architecture='Transformer',
-            description='Transformer model with multi-head self-attention'
+            description='Transformer model with multi-head self-attention (causal mask enabled)',
+            is_causal=True,  # CAUSAL: Uses causal mask by default to prevent look-ahead
+            model_category='forecasting'
         )
 
         # ========== BASIC PINN VARIANTS ==========

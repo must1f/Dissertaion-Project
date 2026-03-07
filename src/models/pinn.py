@@ -30,6 +30,13 @@ logger = get_logger(__name__)
 class PhysicsLoss(nn.Module):
     """
     Physics-based loss functions for financial time series
+
+    DIMENSIONAL CONSISTENCY:
+    Physics residuals must be computed on properly scaled data:
+    - Black-Scholes: Requires real (de-normalised) prices S and option values V
+    - GBM/OU/Langevin: Residuals are normalised by their std to ensure consistent magnitude
+
+    This addresses the audit finding about mixing normalised and raw values.
     """
 
     def __init__(
@@ -43,7 +50,11 @@ class PhysicsLoss(nn.Module):
         # Learnable physics parameters (initial values)
         theta_init: float = 1.0,      # OU mean reversion speed
         gamma_init: float = 0.5,      # Langevin friction coefficient
-        temperature_init: float = 0.1  # Langevin temperature
+        temperature_init: float = 0.1,  # Langevin temperature
+        # Scaler parameters for de-normalisation (set during training)
+        price_mean: float = 0.0,
+        price_std: float = 1.0,
+        normalise_residuals: bool = True  # Normalise residuals for consistent magnitude
     ):
         """
         Initialize physics loss with LEARNABLE physics parameters
@@ -67,6 +78,20 @@ class PhysicsLoss(nn.Module):
         self.lambda_langevin = lambda_langevin
         self.risk_free_rate = risk_free_rate
         self.dt = dt
+
+        # ===== DIMENSIONAL CONSISTENCY =====
+        # Store scaler parameters for de-normalising prices in physics computations
+        self.price_mean = price_mean
+        self.price_std = price_std
+        self.normalise_residuals = normalise_residuals
+
+        # Track residual magnitudes for diagnostics
+        self._residual_rms = {
+            'gbm': 0.0,
+            'ou': 0.0,
+            'langevin': 0.0,
+            'black_scholes': 0.0
+        }
 
         # ========== LEARNABLE PHYSICS PARAMETERS ==========
         # These are registered as nn.Parameter so they're optimized during training
@@ -110,6 +135,37 @@ class PhysicsLoss(nn.Module):
             'temperature': self.temperature.item()
         }
 
+    def get_residual_rms(self) -> Dict[str, float]:
+        """
+        Get RMS magnitudes of physics residuals (for diagnostics).
+
+        These values indicate the scale of each physics residual before normalisation.
+        Large values may indicate dimensional inconsistency or poor constraint fit.
+
+        Returns:
+            Dict with gbm_residual_rms, ou_residual_rms, langevin_residual_rms, bs_residual_rms
+        """
+        return {
+            'gbm_residual_rms': self._residual_rms.get('gbm', 0.0),
+            'ou_residual_rms': self._residual_rms.get('ou', 0.0),
+            'langevin_residual_rms': self._residual_rms.get('langevin', 0.0),
+            'bs_residual_rms': self._residual_rms.get('black_scholes', 0.0)
+        }
+
+    def set_scaler_params(self, price_mean: float, price_std: float):
+        """
+        Set scaler parameters for de-normalising physics computations.
+
+        Should be called before training with the dataset's scaler values.
+
+        Args:
+            price_mean: Mean of the close price used for normalisation
+            price_std: Std of the close price used for normalisation
+        """
+        self.price_mean = price_mean
+        self.price_std = price_std
+        logger.info(f"PhysicsLoss scaler params set: mean={price_mean:.4f}, std={price_std:.4f}")
+
     def gbm_residual(
         self,
         S: torch.Tensor,
@@ -127,11 +183,18 @@ class PhysicsLoss(nn.Module):
             sigma: Volatility parameter
 
         Returns:
-            GBM residual
+            GBM residual (normalised for dimensional consistency)
         """
         # GBM equation: dS = μS dt + σS dW
         # Residual: dS/dt - μS (we can't directly model dW)
         residual = dS_dt - mu * S
+
+        # ===== NORMALISE RESIDUAL FOR DIMENSIONAL CONSISTENCY =====
+        # This prevents residuals from being inflated by dt=1/252
+        if self.normalise_residuals:
+            residual_std = residual.std() + 1e-8
+            residual = residual / residual_std
+            self._residual_rms['gbm'] = float(residual_std.detach())
 
         # L2 loss on residual
         return torch.mean(residual ** 2)
@@ -184,7 +247,9 @@ class PhysicsLoss(nn.Module):
         x: torch.Tensor,
         sigma: torch.Tensor,
         price_feature_idx: int = 0,
-        r: Optional[torch.Tensor] = None
+        r: Optional[torch.Tensor] = None,
+        price_mean: Optional[float] = None,
+        price_std: Optional[float] = None
     ) -> torch.Tensor:
         """
         Black-Scholes PDE residual using AUTOMATIC DIFFERENTIATION
@@ -194,35 +259,50 @@ class PhysicsLoss(nn.Module):
 
         Black-Scholes PDE: ∂V/∂t + ½σ²S²(∂²V/∂S²) + rS(∂V/∂S) - rV = 0
 
-        Since we don't have explicit time input, we use a simplified steady-state
-        version: ½σ²S²(∂²V/∂S²) + rS(∂V/∂S) - rV ≈ 0
+        DIMENSIONAL CONSISTENCY FIX:
+        The audit identified that mixing normalised V,S with raw σ,r creates
+        dimensionally inconsistent residuals. We now de-normalise S and V
+        before computing the PDE.
 
         Args:
             model: Neural network model that produces predictions V
             x: Input tensor [batch, seq_len, features] with the price feature
-            sigma: Volatility tensor [batch] or scalar
+            sigma: Volatility tensor [batch] or scalar (should be in real units)
             price_feature_idx: Index of the price feature in the feature dimension
             r: Risk-free rate (optional, uses default if None)
+            price_mean: Mean for de-normalising prices (uses self.price_mean if None)
+            price_std: Std for de-normalising prices (uses self.price_std if None)
 
         Returns:
-            Black-Scholes PDE residual loss
+            Black-Scholes PDE residual loss (normalised)
         """
         if r is None:
             r = torch.tensor(self.risk_free_rate, device=x.device, dtype=x.dtype)
+
+        # Use stored scaler params if not provided
+        if price_mean is None:
+            price_mean = self.price_mean
+        if price_std is None:
+            price_std = self.price_std
 
         # Clone input and enable gradient tracking
         x_grad = x.clone().detach().requires_grad_(True)
 
         # Forward pass through model
-        V = model(x_grad)
+        V_norm = model(x_grad)
         # Handle models that return tuple (output, hidden_state)
-        if isinstance(V, tuple):
-            V = V[0]
-        if len(V.shape) == 1:
-            V = V.unsqueeze(-1)
+        if isinstance(V_norm, tuple):
+            V_norm = V_norm[0]
+        if len(V_norm.shape) == 1:
+            V_norm = V_norm.unsqueeze(-1)
 
-        # Extract current price S from the last timestep
-        S = x[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+        # Extract current price S from the last timestep (normalised)
+        S_norm = x[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+
+        # ===== DE-NORMALISE S AND V FOR DIMENSIONAL CONSISTENCY =====
+        # Black-Scholes requires real price levels, not z-scores
+        S = S_norm * price_std + price_mean
+        V = V_norm * price_std + price_mean
 
         # Ensure sigma has correct shape
         if sigma.dim() == 0:
@@ -231,9 +311,10 @@ class PhysicsLoss(nn.Module):
             sigma = sigma.unsqueeze(-1)
 
         # ========== COMPUTE FIRST DERIVATIVE dV/dS via AUTOGRAD ==========
-        grad_outputs = torch.ones_like(V)
+        # Note: derivatives computed w.r.t. normalised x, then scaled
+        grad_outputs = torch.ones_like(V_norm)
         dV_dx = torch.autograd.grad(
-            outputs=V,
+            outputs=V_norm,
             inputs=x_grad,
             grad_outputs=grad_outputs,
             create_graph=True,  # CRITICAL: enables higher-order derivatives
@@ -241,18 +322,23 @@ class PhysicsLoss(nn.Module):
         )[0]
 
         # Extract gradient w.r.t. price feature at last timestep
-        dV_dS = dV_dx[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+        dV_dS_norm = dV_dx[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+        # Chain rule: dV/dS = (dV_norm/dS_norm) * (price_std / price_std) = dV_norm/dS_norm
+        # Since V = V_norm * std + mean, dV/dS_norm = std, so dV/dS = dV_norm/dS_norm
+        dV_dS = dV_dS_norm
 
         # ========== COMPUTE SECOND DERIVATIVE d²V/dS² via AUTOGRAD ==========
         d2V_dx = torch.autograd.grad(
-            outputs=dV_dS,
+            outputs=dV_dS_norm,
             inputs=x_grad,
-            grad_outputs=torch.ones_like(dV_dS),
+            grad_outputs=torch.ones_like(dV_dS_norm),
             create_graph=True,  # CRITICAL: integrates into training
             retain_graph=True
         )[0]
 
-        d2V_dS2 = d2V_dx[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+        d2V_dS2_norm = d2V_dx[:, -1, price_feature_idx:price_feature_idx+1]  # [batch, 1]
+        # Chain rule: d²V/dS² scales with 1/std
+        d2V_dS2 = d2V_dS2_norm / (price_std + 1e-8)
 
         # ========== BLACK-SCHOLES PDE RESIDUAL ==========
         # Simplified steady-state form (without ∂V/∂t):
@@ -262,6 +348,12 @@ class PhysicsLoss(nn.Module):
             + r * S * dV_dS
             - r * V
         )
+
+        # ===== NORMALISE RESIDUAL FOR CONSISTENT MAGNITUDE =====
+        if self.normalise_residuals:
+            residual_std = bs_residual.std() + 1e-8
+            bs_residual = bs_residual / residual_std
+            self._residual_rms['black_scholes'] = float(residual_std.detach())
 
         return torch.mean(bs_residual ** 2)
 
@@ -285,11 +377,17 @@ class PhysicsLoss(nn.Module):
             sigma: Volatility
 
         Returns:
-            OU residual
+            OU residual (normalised for dimensional consistency)
         """
         # OU equation: dX = θ(μ - X)dt + σdW
         # Residual: dX/dt - θ(μ - X)
         residual = dX_dt - theta * (mu - X)
+
+        # ===== NORMALISE RESIDUAL FOR DIMENSIONAL CONSISTENCY =====
+        if self.normalise_residuals:
+            residual_std = residual.std() + 1e-8
+            residual = residual / residual_std
+            self._residual_rms['ou'] = float(residual_std.detach())
 
         return torch.mean(residual ** 2)
 
@@ -313,10 +411,16 @@ class PhysicsLoss(nn.Module):
             T: Temperature parameter
 
         Returns:
-            Langevin residual
+            Langevin residual (normalised for dimensional consistency)
         """
         # Langevin equation: dX/dt = -γ∇U(X) + noise
         residual = dX_dt + gamma * grad_U
+
+        # ===== NORMALISE RESIDUAL FOR DIMENSIONAL CONSISTENCY =====
+        if self.normalise_residuals:
+            residual_std = residual.std() + 1e-8
+            residual = residual / residual_std
+            self._residual_rms['langevin'] = float(residual_std.detach())
 
         return torch.mean(residual ** 2)
 
@@ -425,6 +529,11 @@ class PhysicsLoss(nn.Module):
 
         loss_dict['physics_loss'] = physics_loss.item()
         loss_dict['total_loss'] = total_loss.item()
+
+        # ===== LOG RESIDUAL MAGNITUDES FOR DIAGNOSTICS =====
+        # These help identify dimensional inconsistency issues
+        residual_rms = self.get_residual_rms()
+        loss_dict.update(residual_rms)
 
         return total_loss, loss_dict
 
@@ -637,3 +746,11 @@ class PINNModel(nn.Module):
         logger.info(f"  θ (OU mean reversion): {params['theta']:.4f}")
         logger.info(f"  γ (Langevin friction): {params['gamma']:.4f}")
         logger.info(f"  T (Langevin temperature): {params['temperature']:.4f}")
+
+    def get_residual_rms(self) -> Dict[str, float]:
+        """Get RMS magnitudes of physics residuals (for diagnostics)"""
+        return self.physics_loss.get_residual_rms()
+
+    def set_scaler_params(self, price_mean: float, price_std: float):
+        """Set scaler parameters for de-normalising physics computations"""
+        self.physics_loss.set_scaler_params(price_mean, price_std)

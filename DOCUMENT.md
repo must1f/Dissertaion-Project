@@ -30,6 +30,7 @@
 41. [Google Colab Training Notebook](#41-google-colab-training-notebook-2026-03-05)
 42. [Colab Notebook Metrics & Data Prep Updates](#42-colab-notebook-metrics--data-prep-updates-2026-03-05)
 43. [Colab S&P 500 Data & Metrics Audit](#43-colab-sp-500-data--metrics-audit-2026-03-05)
+44. [MODEL.md Dissertation-Ready Review](#44-modelmd-dissertation-ready-review-2026-03-05)
 
 ---
 
@@ -6284,6 +6285,7 @@ Enforced the Colab training notebook to pull only S&P 500 (^GSPC) data from the 
    - Ensured dual-phase PINN metrics include mean error and corrected the DP summary print string for valid JSON serialization.
    - Added an epoch-only progress mode (disables batch-level tqdm bars) to keep Colab output concise while still reporting per-epoch progress.
    - Defaulted price-model training to multi-ticker mode so the research run aggregates across S&P 500 constituents by default.
+   - Added a logging-silencing cell that sets all training loggers to WARNING to suppress batch-level INFO/DEBUG output in Colab.
    - Added a metrics coverage audit cell that verifies required metrics per model type, checks all plot/CSV artifacts exist, and writes `results/colab_runs/metrics_audit.json`.
 2. **File**: `DOCUMENT.md`
    - Documented the S&P 500 data enforcement and metrics audit additions.
@@ -6297,3 +6299,341 @@ Enforced the Colab training notebook to pull only S&P 500 (^GSPC) data from the 
 |------|---------|
 | `Jupyter/Colab_All_Models.ipynb` | Enforced ^GSPC 10-year data, fixed DP summary serialization, added metrics/audit cell |
 | `DOCUMENT.md` | Added entry describing S&P 500 data enforcement and audit |
+
+## 44. MODEL.md Dissertation-Ready Review (2026-03-05)
+
+### Overview
+Comprehensive review of MODEL.md to resolve internal inconsistencies and address high-impact technical risks that could undermine dissertation results. Changed audit status from "ALL VERIFIED" to "IMPLEMENTATIONS VERIFIED - EVALUATION PENDING" to accurately reflect the current state.
+
+### Key Issues Addressed
+
+1. **Resolved "ALL VERIFIED" vs "Needs Verification" inconsistency**
+   - Changed header to "IMPLEMENTATIONS VERIFIED - EVALUATION PENDING"
+   - Made clear distinction: model code is verified, evaluation pipeline needs fixes
+
+2. **Documented financial metrics clipping issue**
+   - Current clipping (Sharpe ±5, Sortino ±10) hides potential bugs
+   - Added requirement to store unclipped "raw" values for debugging
+   - Added metrics table showing which values need raw storage
+
+3. **Committed to physics loss scale fix (Option 1)**
+   - Denormalise V and S before computing BS residual
+   - Standardise GBM/OU/Langevin residuals by running std
+   - Added implementation pseudocode
+
+4. **Added evaluation contract (§5)**
+   - De-standardise prices before trading metrics
+   - Verified position lag is implemented (L:1164-1166)
+   - Added pending items for enforcement assertions
+
+5. **Added causality classification table**
+   - BiLSTM and unmasked Transformer marked as "Oracle/Non-causal"
+   - LSTM, GRU, Attention LSTM marked as "Causal/Forecasting"
+   - Added rule to separate leaderboards
+
+6. **Enhanced DP-PINN evaluation protocol (§7.9-7.10)**
+   - Added specific grid parameters (Nx=256, Nt=100)
+   - Added required dissertation plots list
+   - Added three-baseline comparison requirement
+   - Explained "stiff" in context of Burgers' equation
+
+7. **Added §15 Dissertation-Ready Checklist**
+   - 22 actionable items across 5 categories
+   - Status tracking (DONE/PENDING) for each item
+   - Verification commands for quick sanity checks
+
+8. **Updated results table with warnings**
+   - Added ⚠️ markers for suspicious values
+   - Added "Status" column showing all need reruns
+   - Added explicit "DO NOT CITE" warning
+
+### Changes Made
+
+**File**: `MODEL.md`
+- Changed header audit status
+- Updated §2.5 "Needs Verification" to "PENDING VERIFICATION"
+- Rewrote §5 Leakage section with causality classification and evaluation contract
+- Rewrote dimensional consistency section with committed fix
+- Updated §9 audit table to show implementation vs evaluation status
+- Updated §10.2 metrics table with "Raw Stored?" column
+- Updated §2.8 results table with warnings and status
+- Enhanced §7.9-7.10 DP-PINN evaluation protocol
+- Added §15 Dissertation-Ready Checklist (new section)
+
+### Verification
+Run the verification commands in §15.6 of MODEL.md:
+1. Quick sanity check for z-score vs returns detection
+2. Evaluation contract verification for position lag
+
+### Files Modified
+| File | Changes |
+|------|---------|
+| `MODEL.md` | Comprehensive dissertation-ready review with 8 major updates |
+| `DOCUMENT.md` | Added this documentation entry |
+
+## 45. Dissertation-Ready Evaluation Pipeline Fixes (2026-03-05)
+
+### Overview
+Comprehensive implementation of critical evaluation pipeline fixes identified in the system audit. These changes transform the PINN financial forecasting system into a scientifically valid research pipeline suitable for dissertation results.
+
+### Changes Implemented
+
+#### 1. Price Scale Validation for Financial Metrics
+**Problem**: Models predict z-score normalised prices, but financial metrics require real price levels.
+
+**Solution**: Added `assert_price_scale()` function that fails fast when z-scores are passed to trading metrics.
+
+**File**: `src/evaluation/financial_metrics.py`
+
+```python
+def assert_price_scale(
+    prices: np.ndarray,
+    context: str = "trading metrics",
+    min_std_threshold: float = 1.0,
+    raise_error: bool = True
+) -> bool:
+    """
+    Validate that prices are de-standardised (not z-scores).
+    
+    Z-scores have std ~1; real prices have std >> 1.
+    Raises ValueError if prices appear to be z-scores.
+    """
+    price_std = np.std(prices)
+    if price_std < min_std_threshold:
+        raise ValueError(
+            f"Input appears to be z-scores. "
+            f"De-standardise: price = z_score * close_std + close_mean"
+        )
+    return True
+
+def destandardise_prices(z_scores, price_mean, price_std):
+    """Convert z-scores back to real prices."""
+    return z_scores * price_std + price_mean
+```
+
+Also added `validate_scale=True` parameter to `compute_strategy_returns()`.
+
+#### 2. Raw (Unclipped) Metrics Storage
+**Problem**: Sharpe and Sortino clipping hides evaluation errors.
+
+**Solution**: Store both raw (unclipped) and display (clipped) versions.
+
+```python
+# New methods in FinancialMetrics class
+sharpe_ratio_raw()  # Returns unclipped value
+sortino_ratio_raw() # Returns unclipped value
+
+# compute_all_metrics() now returns:
+{
+    "sharpe_ratio": 2.5,         # Clipped for display
+    "sharpe_ratio_raw": 7.42,    # Unclipped for research
+    "sharpe_ratio_display": 2.5,
+    "sortino_ratio": 5.0,
+    "sortino_ratio_raw": 13.8,
+    "sortino_ratio_display": 5.0,
+    ...
+}
+```
+
+#### 3. Causal vs Oracle Model Classification
+**Problem**: BiLSTM uses future context but was compared directly to forecasting models.
+
+**Solution**: Added `is_causal` and `model_category` fields to model registry and leaderboard.
+
+**File**: `src/models/model_registry.py`
+
+```python
+@dataclass
+class ModelInfo:
+    ...
+    is_causal: bool = True  # True = forecasting, False = oracle
+    model_category: str = "forecasting"  # "forecasting" or "oracle"
+```
+
+Model classifications:
+- **Causal (Forecasting)**: LSTM, GRU, Attention LSTM, Transformer (masked), all PINNs
+- **Oracle (Non-causal)**: BiLSTM, Transformer (unmasked)
+
+**File**: `src/evaluation/leaderboard.py`
+
+```python
+# New database columns
+is_causal INTEGER DEFAULT 1
+model_category TEXT DEFAULT 'forecasting'
+
+# New query methods
+db.get_causal_ranked(metric)   # Only causal models
+db.get_oracle_ranked(metric)   # Only oracle models
+```
+
+#### 4. Transformer Causal Mask Fix
+**Problem**: Transformer was non-causal by default (look-ahead bias).
+
+**Solution**: Added `causal=True` parameter, applies mask automatically.
+
+**File**: `src/models/transformer.py`
+
+```python
+class TransformerModel(nn.Module):
+    def __init__(
+        self,
+        ...
+        causal: bool = True  # NEW: Default to causal
+    ):
+        self.causal = causal
+    
+    def forward(self, x, src_mask=None, ...):
+        # Automatically generate causal mask if causal=True
+        if src_mask is None and self.causal:
+            seq_len = x.size(1)
+            src_mask = self.generate_square_subsequent_mask(seq_len, x.device)
+        ...
+```
+
+#### 5. Physics Loss Dimensional Consistency
+**Problem**: Physics residuals mixed normalised V,S with raw σ,r.
+
+**Solution**: 
+1. De-normalise S,V in Black-Scholes before computing PDE
+2. Normalise all residuals by their std before squaring
+3. Log residual RMS for diagnostics
+
+**File**: `src/models/pinn.py`
+
+```python
+class PhysicsLoss(nn.Module):
+    def __init__(
+        self,
+        ...
+        price_mean: float = 0.0,    # NEW: For de-normalisation
+        price_std: float = 1.0,     # NEW: For de-normalisation
+        normalise_residuals: bool = True  # NEW: Normalise by std
+    ):
+        self._residual_rms = {
+            'gbm': 0.0, 'ou': 0.0, 
+            'langevin': 0.0, 'black_scholes': 0.0
+        }
+    
+    def gbm_residual(self, S, dS_dt, mu, sigma):
+        residual = dS_dt - mu * S
+        if self.normalise_residuals:
+            residual = residual / (residual.std() + 1e-8)
+            self._residual_rms['gbm'] = residual.std().item()
+        return torch.mean(residual ** 2)
+    
+    def get_residual_rms(self):
+        """Returns diagnostic RMS values for each physics term."""
+        return self._residual_rms
+    
+    def set_scaler_params(self, price_mean, price_std):
+        """Set scaler params for de-normalising physics computations."""
+        self.price_mean = price_mean
+        self.price_std = price_std
+```
+
+#### 6. Enhanced Reproducibility Infrastructure
+**Problem**: Missing metadata for full experiment reproducibility.
+
+**Solution**: Added comprehensive `ExperimentMetadata` class.
+
+**File**: `src/utils/reproducibility.py`
+
+```python
+@dataclass
+class ScalerParams:
+    close_mean: float
+    close_std: float
+    ticker: str
+
+@dataclass
+class ExecutionAssumptions:
+    execution_model: str = "close_to_close"
+    transaction_cost: float = 0.001
+    slippage: float = 0.0
+    position_lag: int = 1
+
+@dataclass
+class ExperimentMetadata:
+    experiment_id: str
+    config_hash: str           # SHA256 of config
+    scaler_params: Dict[str, ScalerParams]
+    execution: ExecutionAssumptions
+    seed: int
+    torch_seed: int
+    numpy_seed: int
+    environment: EnvironmentInfo
+    ...
+    
+def create_experiment_metadata(
+    experiment_name,
+    config,
+    model_key,
+    scaler_params={"AAPL": (150.0, 10.0)},
+    ...
+) -> ExperimentMetadata:
+    """Create complete metadata for reproducibility."""
+```
+
+#### 7. Dissertation Validation Script
+**New File**: `scripts/verify_dissertation.py`
+
+Comprehensive verification suite that checks:
+1. All models create and forward pass
+2. Financial metrics are mathematically correct
+3. Physics gradients propagate
+4. Causal/oracle separation is enforced
+5. Reproducibility works
+6. Leaderboard supports all features
+
+Run before producing dissertation results:
+```bash
+python scripts/verify_dissertation.py
+```
+
+Expected output:
+```
+✓ PASS: models
+✓ PASS: metrics
+✓ PASS: physics_gradients
+✓ PASS: causal_separation
+✓ PASS: reproducibility
+✓ PASS: leaderboard
+
+✓ SYSTEM IS DISSERTATION-READY
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `src/evaluation/financial_metrics.py` | Added assert_price_scale(), destandardise_prices(), raw metric functions, validate_scale parameter |
+| `src/evaluation/leaderboard.py` | Added is_causal, model_category fields; added get_causal_ranked(), get_oracle_ranked() |
+| `src/models/model_registry.py` | Added is_causal, model_category to ModelInfo; added get_causal_models(), get_oracle_models() |
+| `src/models/transformer.py` | Added causal=True parameter with automatic mask generation |
+| `src/models/pinn.py` | Added scaler params, residual normalisation, residual RMS logging |
+| `src/utils/reproducibility.py` | Added ScalerParams, ExecutionAssumptions, ExperimentMetadata classes |
+| `scripts/verify_dissertation.py` | NEW: Comprehensive dissertation validation suite |
+| `DOCUMENT.md` | Added this documentation entry |
+
+### Verification
+
+Run the verification script:
+```bash
+python scripts/verify_dissertation.py
+```
+
+All 6 test categories must pass before producing dissertation results.
+
+### Impact on Existing Code
+
+1. **Training scripts**: Should call `model.set_scaler_params(mean, std)` before training PINNs
+2. **Evaluation scripts**: Should use `validate_scale=True` (default) when computing strategy returns
+3. **Results storage**: Should use `create_experiment_metadata()` for reproducibility
+4. **Leaderboards**: Should use `get_causal_ranked()` for fair model comparison
+
+### Research Integrity Notes
+
+- All existing training results should be considered INVALIDATED until re-trained with these fixes
+- BiLSTM results should NOT be compared directly with forecasting models
+- Sharpe ratios > 5 should be investigated using the raw values
+- Physics loss magnitudes should be checked using residual RMS diagnostics

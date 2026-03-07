@@ -79,6 +79,16 @@ class ExperimentEntry:
     dataset_version: Optional[str] = None
     notes: Optional[str] = None
 
+    # ===== CAUSAL VS ORACLE CLASSIFICATION =====
+    # Scientific validity requires separating causal (forecasting) from oracle models
+    is_causal: bool = True  # True = causal forecasting, False = oracle (uses future info)
+    model_category: str = "forecasting"  # "forecasting" or "oracle"
+
+    # ===== RAW METRICS (unclipped) =====
+    # For research analysis - may exceed display bounds
+    sharpe_ratio_raw: Optional[float] = None
+    sortino_ratio_raw: Optional[float] = None
+
 
 @dataclass
 class LeaderboardEntry:
@@ -141,6 +151,10 @@ class ResultsDatabase:
                     max_drawdown REAL,
                     calmar_ratio REAL,
 
+                    -- Raw (unclipped) metrics for research
+                    sharpe_ratio_raw REAL,
+                    sortino_ratio_raw REAL,
+
                     -- Prediction metrics
                     mse REAL,
                     mae REAL,
@@ -153,6 +167,10 @@ class ResultsDatabase:
                     training_time REAL,
                     n_parameters INTEGER,
                     seed INTEGER,
+
+                    -- Causal vs Oracle classification
+                    is_causal INTEGER DEFAULT 1,  -- 1 = causal, 0 = oracle
+                    model_category TEXT DEFAULT 'forecasting',  -- 'forecasting' or 'oracle'
 
                     -- Metadata
                     dataset_version TEXT,
@@ -202,19 +220,23 @@ class ResultsDatabase:
                 (id, model_name, model_type, config_hash, config_json, timestamp,
                  sharpe_ratio, sortino_ratio, total_return, annualized_return,
                  volatility, max_drawdown, calmar_ratio,
+                 sharpe_ratio_raw, sortino_ratio_raw,
                  mse, mae, rmse, mape, directional_accuracy,
                  n_epochs, training_time, n_parameters, seed,
+                 is_causal, model_category,
                  dataset_version, notes, regime_sharpe_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.experiment_id, entry.model_name, entry.model_type,
                 entry.config_hash, config_json, entry.timestamp,
                 entry.sharpe_ratio, entry.sortino_ratio, entry.total_return,
                 entry.annualized_return, entry.volatility, entry.max_drawdown,
                 entry.calmar_ratio,
+                entry.sharpe_ratio_raw, entry.sortino_ratio_raw,
                 entry.mse, entry.mae, entry.rmse, entry.mape,
                 entry.directional_accuracy,
                 entry.n_epochs, entry.training_time, entry.n_parameters, entry.seed,
+                1 if entry.is_causal else 0, entry.model_category,
                 entry.dataset_version, entry.notes, regime_json
             ))
 
@@ -363,6 +385,70 @@ class ResultsDatabase:
                 GROUP BY model_type
             ) best ON e.model_type = best.model_type
                    AND e.{metric_col} = best.best_value
+        """
+
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn)
+
+    def get_causal_ranked(
+        self,
+        metric: RankingMetric,
+        ascending: bool = None,
+        limit: int = 20
+    ) -> pd.DataFrame:
+        """
+        Get ONLY causal (forecasting) models ranked by a metric.
+
+        For scientific validity, causal models should be compared separately
+        from oracle models that use future information.
+        """
+        if ascending is None:
+            ascending = metric in [
+                RankingMetric.MSE, RankingMetric.MAE,
+                RankingMetric.RMSE, RankingMetric.MAX_DRAWDOWN
+            ]
+
+        order = "ASC" if ascending else "DESC"
+        metric_col = metric.value
+
+        query = f"""
+            SELECT * FROM experiments
+            WHERE {metric_col} IS NOT NULL
+              AND (is_causal = 1 OR is_causal IS NULL)
+            ORDER BY {metric_col} {order}
+            LIMIT {limit}
+        """
+
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn)
+
+    def get_oracle_ranked(
+        self,
+        metric: RankingMetric,
+        ascending: bool = None,
+        limit: int = 20
+    ) -> pd.DataFrame:
+        """
+        Get ONLY oracle (non-causal) models ranked by a metric.
+
+        Oracle models use future information and should not be compared
+        directly with causal forecasting models.
+        """
+        if ascending is None:
+            ascending = metric in [
+                RankingMetric.MSE, RankingMetric.MAE,
+                RankingMetric.RMSE, RankingMetric.MAX_DRAWDOWN
+            ]
+
+        order = "ASC" if ascending else "DESC"
+        metric_col = metric.value
+
+        query = f"""
+            SELECT * FROM experiments
+            WHERE {metric_col} IS NOT NULL
+              AND is_causal = 0
+            ORDER BY {metric_col} {order}
+            LIMIT {limit}
         """
 
         with sqlite3.connect(self.db_path) as conn:

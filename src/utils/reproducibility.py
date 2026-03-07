@@ -436,6 +436,241 @@ def init_experiment(
     return state
 
 
+@dataclass
+class ScalerParams:
+    """
+    Scaler parameters for data normalisation.
+
+    CRITICAL FOR REPRODUCIBILITY:
+    These values are needed to de-standardise predictions before computing
+    financial metrics. Without them, metrics like Sharpe ratio are meaningless.
+    """
+    close_mean: float
+    close_std: float
+    ticker: Optional[str] = None
+    date_range: Optional[str] = None  # e.g., "2020-01-01 to 2023-12-31"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ExecutionAssumptions:
+    """
+    Trading execution assumptions for backtesting.
+
+    These should be stored with results for research transparency.
+    """
+    execution_model: str = "close_to_close"  # When trades execute
+    transaction_cost: float = 0.001  # 10 basis points
+    slippage: float = 0.0  # Slippage model (0 = none)
+    position_lag: int = 1  # Signal at t executes at t+lag
+    max_leverage: float = 1.0  # Maximum position size
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ExperimentMetadata:
+    """
+    Complete metadata for dissertation-ready experiment reproducibility.
+
+    This class captures ALL information needed to reproduce an experiment:
+    - Configuration hash for parameter tracking
+    - Scaler parameters for de-normalisation
+    - Execution assumptions for backtesting
+    - All random seeds used
+    - Environment information
+    - Git commit and dirty status
+    """
+    # Experiment identification
+    experiment_id: str
+    experiment_name: str
+    timestamp: str
+
+    # Configuration
+    config_hash: str  # SHA256 hash of full config
+    config: Dict[str, Any]
+
+    # Model information
+    model_key: str
+    model_type: str  # 'baseline', 'pinn', 'advanced'
+    is_causal: bool = True  # Causal vs oracle
+
+    # Scaler parameters (CRITICAL for de-standardisation)
+    scaler_params: Dict[str, ScalerParams] = None  # Keyed by ticker
+
+    # Execution assumptions
+    execution: ExecutionAssumptions = None
+
+    # Seeds
+    seed: int = 42
+    torch_seed: int = 42
+    numpy_seed: int = 42
+    python_seed: int = 42
+
+    # Environment
+    environment: EnvironmentInfo = None
+
+    # Dataset version
+    dataset_version: str = None
+    data_date_range: str = None
+    n_samples: int = 0
+    n_features: int = 0
+
+    def __post_init__(self):
+        if self.scaler_params is None:
+            self.scaler_params = {}
+        if self.execution is None:
+            self.execution = ExecutionAssumptions()
+
+    def add_scaler_params(self, ticker: str, close_mean: float, close_std: float,
+                          date_range: str = None):
+        """Add scaler parameters for a ticker"""
+        self.scaler_params[ticker] = ScalerParams(
+            close_mean=close_mean,
+            close_std=close_std,
+            ticker=ticker,
+            date_range=date_range
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'experiment_id': self.experiment_id,
+            'experiment_name': self.experiment_name,
+            'timestamp': self.timestamp,
+            'config_hash': self.config_hash,
+            'config': self.config,
+            'model_key': self.model_key,
+            'model_type': self.model_type,
+            'is_causal': self.is_causal,
+            'scaler_params': {k: v.to_dict() for k, v in self.scaler_params.items()},
+            'execution': self.execution.to_dict() if self.execution else None,
+            'seeds': {
+                'seed': self.seed,
+                'torch_seed': self.torch_seed,
+                'numpy_seed': self.numpy_seed,
+                'python_seed': self.python_seed
+            },
+            'environment': self.environment.to_dict() if self.environment else None,
+            'dataset_version': self.dataset_version,
+            'data_date_range': self.data_date_range,
+            'n_samples': self.n_samples,
+            'n_features': self.n_features
+        }
+
+    def save(self, path: Path):
+        """Save experiment metadata to JSON"""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.info(f"Saved experiment metadata to {path}")
+
+    @classmethod
+    def load(cls, path: Path) -> 'ExperimentMetadata':
+        """Load experiment metadata from JSON"""
+        with open(path, 'r') as f:
+            data = json.load(f)
+
+        # Reconstruct nested objects
+        scaler_params = {}
+        for k, v in data.get('scaler_params', {}).items():
+            scaler_params[k] = ScalerParams(**v)
+
+        execution = ExecutionAssumptions(**data['execution']) if data.get('execution') else None
+        environment = EnvironmentInfo(**data['environment']) if data.get('environment') else None
+
+        seeds = data.get('seeds', {})
+
+        return cls(
+            experiment_id=data['experiment_id'],
+            experiment_name=data['experiment_name'],
+            timestamp=data['timestamp'],
+            config_hash=data['config_hash'],
+            config=data['config'],
+            model_key=data['model_key'],
+            model_type=data['model_type'],
+            is_causal=data.get('is_causal', True),
+            scaler_params=scaler_params,
+            execution=execution,
+            seed=seeds.get('seed', 42),
+            torch_seed=seeds.get('torch_seed', 42),
+            numpy_seed=seeds.get('numpy_seed', 42),
+            python_seed=seeds.get('python_seed', 42),
+            environment=environment,
+            dataset_version=data.get('dataset_version'),
+            data_date_range=data.get('data_date_range'),
+            n_samples=data.get('n_samples', 0),
+            n_features=data.get('n_features', 0)
+        )
+
+
+def create_experiment_metadata(
+    experiment_name: str,
+    config: Dict[str, Any],
+    model_key: str,
+    model_type: str,
+    seed: int = 42,
+    scaler_params: Dict[str, tuple] = None,  # {ticker: (mean, std)}
+    transaction_cost: float = 0.001,
+    is_causal: bool = True
+) -> ExperimentMetadata:
+    """
+    Create experiment metadata with all reproducibility information.
+
+    Args:
+        experiment_name: Human-readable name
+        config: Full training configuration
+        model_key: Model key from registry
+        model_type: Model type (baseline, pinn, advanced)
+        seed: Random seed
+        scaler_params: Dict mapping ticker to (close_mean, close_std) tuple
+        transaction_cost: Transaction cost for backtesting
+        is_causal: Whether model is causal (no look-ahead)
+
+    Returns:
+        ExperimentMetadata ready to be saved
+    """
+    import uuid
+
+    # Generate experiment ID
+    experiment_id = f"{model_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+    # Compute config hash
+    config_hash = compute_config_hash(config)
+
+    # Get environment
+    environment = get_environment_info()
+
+    # Create metadata
+    metadata = ExperimentMetadata(
+        experiment_id=experiment_id,
+        experiment_name=experiment_name,
+        timestamp=datetime.now().isoformat(),
+        config_hash=config_hash,
+        config=config,
+        model_key=model_key,
+        model_type=model_type,
+        is_causal=is_causal,
+        seed=seed,
+        torch_seed=seed,
+        numpy_seed=seed,
+        python_seed=seed,
+        environment=environment,
+        execution=ExecutionAssumptions(transaction_cost=transaction_cost)
+    )
+
+    # Add scaler params
+    if scaler_params:
+        for ticker, (mean, std) in scaler_params.items():
+            metadata.add_scaler_params(ticker, mean, std)
+
+    return metadata
+
+
 class MultiSeedRunner:
     """
     Run experiments with multiple seeds for statistical robustness.

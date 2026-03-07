@@ -66,6 +66,100 @@ from ..constants import RISK_FREE_RATE, TRADING_DAYS_PER_YEAR
 logger = get_logger(__name__)
 
 
+# ===== PRICE SCALE VALIDATION =====
+# CRITICAL: Financial metrics require de-standardised price levels, not z-scores
+
+def assert_price_scale(
+    prices: np.ndarray,
+    context: str = "trading metrics",
+    min_std_threshold: float = 1.0,
+    raise_error: bool = True
+) -> bool:
+    """
+    Validate that prices are de-standardised (not z-scores) before computing financial metrics.
+
+    Using z-scores in trading simulations produces meaningless Sharpe ratios and returns.
+    This function provides a fail-fast check to prevent such errors.
+
+    Args:
+        prices: Array of price values to validate
+        context: Description of where validation is happening (for error messages)
+        min_std_threshold: Minimum standard deviation expected for real prices.
+                          Z-scores typically have std ~1, real prices have std >> 1.
+        raise_error: If True, raise ValueError on failure. If False, return bool.
+
+    Returns:
+        True if prices appear to be real price levels, False otherwise.
+
+    Raises:
+        ValueError: If prices appear to be z-scores and raise_error=True
+
+    Example:
+        >>> # Z-scores will fail
+        >>> z_scores = np.array([0.1, -0.2, 0.5, -0.1, 0.3])  # std ~0.26
+        >>> assert_price_scale(z_scores)  # Raises ValueError
+
+        >>> # Real prices will pass
+        >>> prices = np.array([150.2, 151.5, 149.8, 152.1, 150.9])  # std > 1
+        >>> assert_price_scale(prices)  # Returns True
+    """
+    prices = np.asarray(prices).flatten()
+    prices = prices[~np.isnan(prices)]
+
+    if len(prices) < 2:
+        if raise_error:
+            raise ValueError(f"Insufficient data for {context}: need at least 2 valid prices")
+        return False
+
+    price_std = np.std(prices)
+    price_mean = np.mean(prices)
+
+    # Z-scores typically have: mean ~0, std ~1
+    # Real prices typically have: mean >> 1, std >> 1 (for stocks, ETFs, etc.)
+    # We check std primarily since mean could legitimately be near 0 for some instruments
+
+    if price_std < min_std_threshold:
+        error_msg = (
+            f"Input appears to be z-scores rather than price levels for {context}. "
+            f"Price std={price_std:.4f} < threshold={min_std_threshold}. "
+            f"De-standardise predictions before computing trading metrics: "
+            f"price = z_score * close_std + close_mean"
+        )
+        if raise_error:
+            raise ValueError(error_msg)
+        logger.warning(error_msg)
+        return False
+
+    return True
+
+
+def destandardise_prices(
+    z_scores: np.ndarray,
+    price_mean: float,
+    price_std: float
+) -> np.ndarray:
+    """
+    Convert z-score normalised values back to real price levels.
+
+    This MUST be called before computing financial metrics if your model
+    outputs normalised predictions.
+
+    Args:
+        z_scores: Normalised predictions (z-scores)
+        price_mean: Original mean used for normalisation
+        price_std: Original standard deviation used for normalisation
+
+    Returns:
+        De-standardised prices
+
+    Example:
+        >>> # During training, you normalised: z = (price - mean) / std
+        >>> # Before metrics, reverse it:
+        >>> real_prices = destandardise_prices(predictions, close_mean, close_std)
+    """
+    return z_scores * price_std + price_mean
+
+
 class FinancialMetrics:
     """
     Comprehensive financial performance metrics
@@ -116,6 +210,86 @@ class FinancialMetrics:
         sharpe = np.clip(sharpe, -5.0, 5.0)
 
         return float(sharpe)
+
+    @staticmethod
+    def sharpe_ratio_raw(
+        returns: Union[np.ndarray, pd.Series],
+        risk_free_rate: float = RISK_FREE_RATE,
+        periods_per_year: int = TRADING_DAYS_PER_YEAR
+    ) -> float:
+        """
+        Calculate annualized Sharpe Ratio WITHOUT CLIPPING.
+
+        Use this for research/debugging when you need the true unclipped value.
+        For display/reporting, use sharpe_ratio() which clips to [-5, 5].
+
+        Returns:
+            Annualized Sharpe ratio (unclipped, may be very large or inf)
+        """
+        if isinstance(returns, pd.Series):
+            returns = returns.values
+
+        returns = returns[~np.isnan(returns)]
+
+        if len(returns) == 0:
+            return 0.0
+
+        # Clip returns to realistic bounds first (to avoid numeric overflow)
+        returns = np.clip(returns, -0.99, 1.0)
+
+        mean_return = np.mean(returns)
+        std_return = np.std(returns, ddof=1)
+
+        if std_return < 1e-10:
+            return 0.0
+
+        rf_per_period = risk_free_rate / periods_per_year
+        sharpe = (mean_return - rf_per_period) / std_return * np.sqrt(periods_per_year)
+
+        # NO CLIPPING - return raw value
+        return float(sharpe) if not np.isinf(sharpe) else float(np.sign(sharpe) * 999.0)
+
+    @staticmethod
+    def sortino_ratio_raw(
+        returns: Union[np.ndarray, pd.Series],
+        risk_free_rate: float = RISK_FREE_RATE,
+        periods_per_year: int = TRADING_DAYS_PER_YEAR,
+        target_return: float = 0.0
+    ) -> float:
+        """
+        Calculate Sortino Ratio WITHOUT CLIPPING.
+
+        Use this for research/debugging when you need the true unclipped value.
+        For display/reporting, use sortino_ratio() which clips to [-10, 10].
+
+        Returns:
+            Annualized Sortino ratio (unclipped, may be very large or inf)
+        """
+        if isinstance(returns, pd.Series):
+            returns = returns.values
+
+        returns = returns[~np.isnan(returns)]
+
+        if len(returns) == 0:
+            return 0.0
+
+        mean_return = np.mean(returns)
+        rf_per_period = risk_free_rate / periods_per_year
+
+        downside_returns = returns[returns < target_return]
+
+        if len(downside_returns) == 0:
+            return 0.0
+
+        downside_std = np.std(downside_returns, ddof=1)
+
+        if downside_std < 1e-10:
+            return 0.0
+
+        sortino = (mean_return - rf_per_period) / downside_std * np.sqrt(periods_per_year)
+
+        # NO CLIPPING - return raw value
+        return float(sortino) if not np.isinf(sortino) else float(np.sign(sortino) * 999.0)
 
     @staticmethod
     def sortino_ratio(
@@ -988,8 +1162,21 @@ class FinancialMetrics:
         metrics['cumulative_return_final'] = FinancialMetrics.cumulative_returns(returns)[-1] if len(returns) > 0 else 0.0
 
         # Risk-adjusted metrics
-        metrics['sharpe_ratio'] = FinancialMetrics.sharpe_ratio(returns, risk_free_rate, periods_per_year)
-        metrics['sortino_ratio'] = FinancialMetrics.sortino_ratio(returns, risk_free_rate, periods_per_year)
+        # Store BOTH raw (unclipped) and display (clipped) versions for research integrity
+        sharpe_raw = FinancialMetrics.sharpe_ratio_raw(returns, risk_free_rate, periods_per_year)
+        sortino_raw = FinancialMetrics.sortino_ratio_raw(returns, risk_free_rate, periods_per_year)
+        sharpe_display = FinancialMetrics.sharpe_ratio(returns, risk_free_rate, periods_per_year)
+        sortino_display = FinancialMetrics.sortino_ratio(returns, risk_free_rate, periods_per_year)
+
+        # Raw values (unclipped) - for research analysis and detecting issues
+        metrics['sharpe_ratio_raw'] = sharpe_raw
+        metrics['sortino_ratio_raw'] = sortino_raw
+
+        # Display values (clipped to bounds) - for reporting/UI
+        metrics['sharpe_ratio'] = sharpe_display
+        metrics['sortino_ratio'] = sortino_display
+        metrics['sharpe_ratio_display'] = sharpe_display
+        metrics['sortino_ratio_display'] = sortino_display
 
         # Drawdown metrics
         max_dd = FinancialMetrics.max_drawdown(returns)
@@ -1073,6 +1260,7 @@ def compute_strategy_returns(
     max_leverage: float = 1.0,
     volatility: np.ndarray | None = None,
     return_details: bool = False,
+    validate_scale: bool = True,
 ) -> np.ndarray:
     """
     Compute strategy returns from price predictions
@@ -1090,6 +1278,13 @@ def compute_strategy_returns(
         min_return: Minimum allowed single-period return (default: -20%)
         price_mean: Optional mean to de-standardise prices
         price_std: Optional std to de-standardise prices
+        threshold: Minimum predicted return magnitude to generate signal
+        sizing_mode: Position sizing method ("sign", "scaled", "prob")
+        max_leverage: Maximum position size for scaled/prob modes
+        volatility: Optional volatility array for scaled sizing
+        return_details: If True, return (returns, details_dict)
+        validate_scale: If True (default), validate that prices are not z-scores.
+                       Set to False only if you're certain inputs are correct.
 
     Returns:
         Strategy returns array (same length as inputs) or tuple of (returns, details)
@@ -1105,6 +1300,23 @@ def compute_strategy_returns(
 
     if len(predictions) != len(actual_prices):
         raise ValueError(f"Length mismatch: predictions ({len(predictions)}) vs actual ({len(actual_prices)})")
+
+    # ===== CRITICAL: VALIDATE PRICE SCALE =====
+    # Ensure inputs are de-standardised before computing trading metrics
+    if validate_scale and not are_returns:
+        # If price_mean/price_std provided, data will be de-standardised below
+        # Only validate if NOT auto-de-standardising
+        if price_mean is None or price_std is None:
+            # Check if actual prices look like z-scores
+            try:
+                assert_price_scale(
+                    actual_prices,
+                    context="compute_strategy_returns (actual_prices)",
+                    raise_error=True
+                )
+            except ValueError as e:
+                logger.error(str(e))
+                raise
 
     # ===== CONVERT PRICES TO RETURNS =====
     if are_returns:

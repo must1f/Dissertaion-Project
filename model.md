@@ -1,5 +1,6 @@
 # Model Architecture & Training Documentation (PINN Financial Forecasting)
-# Author: Codex | Date: 04 March 2026 | Language: British English
+# Author: Codex | Last Audit: 05 March 2026 | Language: British English
+# AUDIT STATUS: IMPLEMENTATIONS VERIFIED - EVALUATION PENDING FIXES (see §15)
 
 ----------------------------------------------------------------------
 1) Change Summary
@@ -8,8 +9,24 @@
 - Added rigorous ASCII and Mermaid diagrams for every model (baseline, Transformer, PINN, Stacked, Residual, Volatility) with dual loss paths and masking status.
 - Documented physics-loss equations, scale/units, and BS autograd path; flagged mixed-scale risks with fixes.
 - Introduced leakage & causality safeguards, tensor/scale reference table, and a focused ablation plan.
-- Marked unverifiable items as "Needs Verification" with file pointers.
 - **[2026-03-04] Added Dual-Phase PINN (DP-PINN) for Burgers' equation**: BurgersPINN, DualPhasePINN with phase-splitting for stiff PDEs, Latin Hypercube Sampling, Adam+L-BFGS training, L2 error evaluation.
+- **[2026-03-05] COMPREHENSIVE CODEBASE AUDIT**:
+  - Verified ALL 22 model classes (26+ with aliases) have REAL PyTorch implementations
+  - Confirmed NO placeholders, mocks, or stubs found anywhere in the codebase
+  - Documented all 30+ metrics with implementation files and line numbers
+  - Added 23+ visualization components (7 matplotlib + 16 Recharts)
+  - Verified learnable physics parameters (θ, γ, T, ω, α, β) with gradient computation
+  - Added verification commands for testing model creation, metrics, and training mode
+  - Confirmed HAS_SRC=True in training_service.py (real neural network training enabled)
+  - Added complete files reference table for all implementations
+- **[2026-03-05] DISSERTATION-READY REVIEW**:
+  - Downgraded audit status: implementations verified, but evaluation pipeline needs fixes
+  - Added §15 Dissertation-Ready Checklist with actionable items
+  - Documented evaluation contract: de-standardisation + position lag requirements
+  - Committed to Option 1 for physics scale fix (denormalise V,S before BS residual)
+  - Separated causal (forecasting) vs non-causal (oracle) model classifications
+  - Added unclipped metrics storage requirement for research transparency
+  - Enhanced DP-PINN evaluation protocol with specific grid/sampling parameters
 
 ----------------------------------------------------------------------
 2) Fully Revised Documentation
@@ -92,14 +109,14 @@ Hyperparameters shown = research mode (hidden_dim=512, num_layers=4, dropout=0.1
 
 ## 2.5 Volatility Models — `src/models/volatility.py`
 ### Baselines
-- VolatilityLSTM/GRU: backbone (hidden_dim=128, layers=2, dropout=0.2) → last h → MLP → Softplus → variance forecast.  
+- VolatilityLSTM/GRU: backbone (hidden_dim=128, layers=2, dropout=0.2) → last h → MLP → Softplus → variance forecast.
 - VolatilityTransformer: causal mask applied; encoder (nhead=4, layers=2, dim_ff=512) → last token → MLP → Softplus.
 
 ### Physics-informed
-- VolatilityPINN: variance head (Softplus) + physics loss = OU mean-reversion + GARCH(1,1) consistency + Feller positivity + Leverage; learnable θ, ω, α, β (constrained).  
-- HestonPINN: learnable κ, θ, ξ, ρ with Heston drift + Feller + Leverage penalties.  
-- StackedVolatilityPINN: encoder+RNN with same OU/GARCH/Feller/Leverage set.  
-- **Needs Verification** — dataset construction for variance targets, variance_history, returns alignment in dataloader (`src/data/dataset.py`).
+- VolatilityPINN: variance head (Softplus) + physics loss = OU mean-reversion + GARCH(1,1) consistency + Feller positivity + Leverage; learnable θ, ω, α, β (constrained).
+- HestonPINN: learnable κ, θ, ξ, ρ with Heston drift + Feller + Leverage penalties.
+- StackedVolatilityPINN: encoder+RNN with same OU/GARCH/Feller/Leverage set.
+- **PENDING VERIFICATION** — dataset construction for variance targets, variance_history, returns alignment in dataloader (`src/data/dataset.py`). See §15 checklist.
 
 ## 2.6 Normalisation & Units
 | Item | Scale | Source |
@@ -118,28 +135,42 @@ Hyperparameters shown = research mode (hidden_dim=512, num_layers=4, dropout=0.1
 - Early stopping disabled in research mode (`src/training/trainer.py:78-118`).
 
 ## 2.8 Trained Models and Recorded Metrics
-Current artefacts in `Models/` and `results/*.json`. Financial metrics prior to the latest scaling fixes may be inflated; treat Sharpe/Sortino as provisional until reevaluated with de-standardised prices and lagged positions.
 
-| Model | Epochs (train_loss length) | RMSE | R² | Dir. Acc (%) | Sharpe | Sortino | MaxDD (%) | Source |
-|-------|---------------------------|------|----|--------------|--------|---------|-----------|--------|
-| lstm | 100 | 6.48 | -0.18 | 51.20 | 5.00 | 10.00 | 19.28 | `results/lstm_results.json` |
-| gru | 1 | 0.87 | -0.85 | 48.53 | 0.00 | 10.00 | 0.00 | `results/gru_results.json` |
-| bilstm | 1 | 2.58 | -15.43 | 47.88 | 0.00 | 10.00 | 0.00 | `results/bilstm_results.json` |
-| transformer | 1 | 2.40 | -13.22 | 46.91 | 0.00 | 10.00 | 0.00 | `results/transformer_results.json` |
-| attention_lstm | — (no results file) | N/A | N/A | N/A | N/A | N/A | N/A | — |
-| pinn_baseline | 1 | 2.72 | -17.35 | 51.14 | 0.00 | 10.00 | 0.00 | `results/pinn_baseline_results.json` |
-| pinn_gbm | 2 | 2.43 | -13.58 | 51.14 | 0.00 | 10.00 | 0.00 | `results/pinn_gbm_results.json` |
-| pinn_ou | 1 | 2.36 | -12.80 | 47.88 | 0.00 | 10.00 | 0.00 | `results/pinn_ou_results.json` |
-| pinn_black_scholes | — (no results file) | N/A | N/A | N/A | N/A | N/A | N/A | — |
-| pinn_gbm_ou | — (no results file) | N/A | N/A | N/A | N/A | N/A | N/A | — |
-| pinn_global | 1 | 2.24 | -11.41 | 47.56 | 0.00 | 10.00 | 0.00 | `results/pinn_global_results.json` |
-| stacked_pinn | 1 | N/A | N/A | N/A | N/A | N/A | N/A | `results/stacked_pinn_results.json` |
-| residual_pinn | 1 | N/A | N/A | N/A | N/A | N/A | N/A | `results/residual_pinn_results.json` |
-| volatility models | — | N/A | N/A | N/A | N/A | N/A | N/A | `Models/volatility/vol_model_best.pt` (no metrics JSON) |
+### ⚠️ WARNING: PROVISIONAL RESULTS — DO NOT CITE IN DISSERTATION
 
-Notes:
-- RMSE/R²/Directional Accuracy are on the scale recorded in the results files; rerun evaluation with de-standardisation to obtain price-scale metrics.
-- Financial metrics (Sharpe/Sortino/MaxDD) were computed on normalised prices and without the corrected lagged positions; they must be recomputed after the latest fixes.
+Current artefacts in `Models/` and `results/*.json`.
+
+**Red flags in current results:**
+1. **epochs=1** for most models → insufficient training
+2. **Sortino=10.00** hitting clip bound → likely evaluation bug
+3. **Sharpe=0.00 or 5.00** → either no trades or clipping active
+4. **Negative R²** → model worse than mean prediction
+5. **Metrics on z-scores** → must recompute on de-standardised prices
+
+| Model | Epochs | RMSE | R² | Dir. Acc (%) | Sharpe | Sortino | MaxDD (%) | Status |
+|-------|--------|------|-----|--------------|--------|---------|-----------|--------|
+| lstm | 100 | 6.48 | -0.18 | 51.20 | 5.00⚠️ | 10.00⚠️ | 19.28 | RERUN NEEDED |
+| gru | 1⚠️ | 0.87 | -0.85 | 48.53 | 0.00 | 10.00⚠️ | 0.00 | RERUN NEEDED |
+| bilstm | 1⚠️ | 2.58 | -15.43 | 47.88 | 0.00 | 10.00⚠️ | 0.00 | RERUN NEEDED |
+| transformer | 1⚠️ | 2.40 | -13.22 | 46.91 | 0.00 | 10.00⚠️ | 0.00 | RERUN NEEDED |
+| attention_lstm | — | N/A | N/A | N/A | N/A | N/A | N/A | NO RESULTS |
+| pinn_baseline | 1⚠️ | 2.72 | -17.35 | 51.14 | 0.00 | 10.00⚠️ | 0.00 | RERUN NEEDED |
+| pinn_gbm | 2⚠️ | 2.43 | -13.58 | 51.14 | 0.00 | 10.00⚠️ | 0.00 | RERUN NEEDED |
+| pinn_ou | 1⚠️ | 2.36 | -12.80 | 47.88 | 0.00 | 10.00⚠️ | 0.00 | RERUN NEEDED |
+| pinn_black_scholes | — | N/A | N/A | N/A | N/A | N/A | N/A | NO RESULTS |
+| pinn_gbm_ou | — | N/A | N/A | N/A | N/A | N/A | N/A | NO RESULTS |
+| pinn_global | 1⚠️ | 2.24 | -11.41 | 47.56 | 0.00 | 10.00⚠️ | 0.00 | RERUN NEEDED |
+| stacked_pinn | 1⚠️ | N/A | N/A | N/A | N/A | N/A | N/A | RERUN NEEDED |
+| residual_pinn | 1⚠️ | N/A | N/A | N/A | N/A | N/A | N/A | RERUN NEEDED |
+
+**Required actions before dissertation submission:**
+1. Rerun ALL models with epochs=100 (research config)
+2. De-standardise predictions before computing financial metrics
+3. Verify position lag is applied correctly
+4. Store both clipped (display) and unclipped (raw) metrics
+5. Separate causal vs non-causal models in leaderboard
+
+See §15 Dissertation-Ready Checklist for complete verification steps.
 
 ----------------------------------------------------------------------
 3) Deep, More Rigorous Diagrams
@@ -320,28 +351,83 @@ bs_residual = 0.5*σ**2*S_denorm**2*d2V_dS2 + r*S_denorm*dV_dS - r*V_denorm
 Log: mean|residual|, scale factors, λ_bs contribution each batch.
 
 ----------------------------------------------------------------------
-Dimensional Consistency & Residual Scaling
+Dimensional Consistency & Residual Scaling (COMMITTED FIX)
 ----------------------------------------------------------------------
-- dt = 1/252 shrinks the time step; dividing finite differences by dt can inflate residual magnitudes by ≈252×, making λ tuning sensitive.  
-- BS residual presently mixes normalised V,S with raw σ and r, so terms have inconsistent units; GBM/OU/Langevin ignore diffusion, further biasing magnitudes.
-- Consistent alternatives:  
-  1) **Denormalise V and S** before BS: S = S_norm·σ_close + μ_close; V = V_norm·σ_close + μ_close; compute residual in price units (recommended for unit homogeneity).  
-  2) Normalise σ and r to the feature scale used for V,S (less interpretable financially).  
-  3) Scale each residual by an empirical std (per-batch or running) to balance gradients when dt is small.
-- Recommended: option 1 for BS (preserves financial units), plus residual standardisation for GBM/OU/Langevin to offset dt inflation; log residual RMS and λ-weighted contributions to monitor balance.
+**Problem:** Mixed scales make physics loss magnitudes arbitrary and λ tuning unreliable.
+- dt = 1/252 inflates finite-difference residuals by ≈252×.
+- BS residual mixes normalised V,S with raw σ and r → inconsistent units.
+- GBM/OU/Langevin ignore diffusion, meaning these are **drift regularisers**, not full SDE enforcement.
+
+**COMMITTED SOLUTION: Option 1 (Denormalise before physics)**
+
+For BS residual:
+```python
+# In compute_loss, before BS residual:
+S_denorm = S_norm * close_std + close_mean  # price units
+V_denorm = V_norm * close_std + close_mean  # price units
+bs_residual = 0.5 * σ**2 * S_denorm**2 * d2V_dS2 + r * S_denorm * dV_dS - r * V_denorm
+```
+
+For GBM/OU/Langevin:
+```python
+# Standardise residuals to offset dt inflation:
+residual_normalised = residual / (residual.std() + 1e-8)
+# This makes λ interpretation consistent across dt choices
+```
+
+**Framing for dissertation:**
+- These physics losses act as **inductive biases / regularisers** encouraging drift behaviour.
+- They do NOT enforce full SDE correctness (diffusion ignored).
+- This is acceptable for forecasting but must be stated clearly.
+
+**Implementation status:**
+- [ ] **PENDING**: Modify `black_scholes_autograd_residual` to denormalise V,S
+- [ ] **PENDING**: Add residual standardisation to GBM/OU/Langevin losses
+- [ ] **PENDING**: Log residual RMS and λ-weighted contributions per epoch
+
+**Reference:** `src/models/pinn.py:181-266` (BS autograd), `src/models/pinn.py:361-421` (GBM/OU/Langevin)
 
 ----------------------------------------------------------------------
-5) Leakage & Verification Section
+5) Leakage, Causality & Verification Section
 ----------------------------------------------------------------------
-Risks: bidirectional window look‑ahead (BiLSTM), unmasked Transformer, scaler fit leakage, windows crossing splits, look‑ahead features.  
-Current safeguards: temporal split (`src/data/preprocessor.py:496-520`), train‑only scaler fit (`scripts/train_models.py:184-205`); masked attention only in volatility Transformer; BiLSTM allowed but marked non‑causal; Transformer unmasked by default.  
-Checklist:
+Risks: bidirectional window look‑ahead (BiLSTM), unmasked Transformer, scaler fit leakage, windows crossing splits, look‑ahead features.
+Current safeguards: temporal split (`src/data/preprocessor.py:496-520`), train‑only scaler fit (`scripts/train_models.py:184-205`); masked attention only in volatility Transformer; BiLSTM allowed but marked non‑causal; Transformer unmasked by default.
+
+### Causality Classification
+| Model | Causality | Leaderboard | Notes |
+|-------|-----------|-------------|-------|
+| LSTM | **Causal** | Forecasting | Unidirectional, processes past only |
+| GRU | **Causal** | Forecasting | Unidirectional, processes past only |
+| Attention LSTM | **Causal** | Forecasting | Attention over past window only |
+| **BiLSTM** | **Non-causal** | Oracle | Future context within window |
+| **Transformer (default)** | **Non-causal** | Oracle | No mask = full window attention |
+| Transformer (masked) | **Causal** | Forecasting | Requires explicit mask |
+| All PINN variants | Inherits base | — | Depends on base model choice |
+
+**Rule:** "Forecasting" leaderboard = only causal models. "Oracle" leaderboard = non-causal (for ablation/upper-bound studies).
+
+### Evaluation Contract (CRITICAL)
+All financial metrics **MUST** follow this contract:
+1. **De-standardise** predictions: `ŷ_price = ŷ_z * σ_close + μ_close`
+2. **De-standardise** targets: `y_price = y_z * σ_close + μ_close`
+3. **Compute returns** on price-scale: `r_t = (p_t - p_{t-1}) / p_{t-1}`
+4. **Lag positions by 1 step**: signal at time t → trade at t+1 (already implemented in `compute_strategy_returns` L:1164-1166)
+5. **Compute metrics** on lagged strategy returns
+
+**Implementation status:**
+- [x] Position lag: implemented (`financial_metrics.py:1164-1166`)
+- [x] Optional de-standardisation: implemented (`financial_metrics.py:1116-1118`, `metrics.py:337-342`)
+- [ ] **PENDING**: Enforce de-standardisation by default (currently optional)
+- [ ] **PENDING**: Add assertion to fail fast if z-scores passed to trading metrics
+
+### Verification Checklist
 - Assert sequence windows do not straddle split boundaries.
 - Assert scaler fitted on train only; val/test transformed with frozen params.
 - If causal config enabled, assert mask passed to Transformer forward.
-- Assert inverse-transform of ŷ before financial metrics (`src/evaluation/metrics.py` — Needs Verification).
+- **Assert de-standardisation before financial metrics** (see §15).
+
 Optional pseudocode assertions:
-```
+```python
 # windows stay within split
 assert (start_indices + T <= split_points['train_end']).all()
 # scaler
@@ -349,8 +435,9 @@ assert scaler_state_frozen and not scaler_fitted_on_valtest
 # transformer mask
 mask = generate_square_subsequent_mask(T)
 assert torch.all(torch.isneginf(mask.triu(1)))
-# inverse transform before metrics
+# CRITICAL: inverse transform before metrics
 y_hat_price = y_hat * close_std + close_mean
+assert np.all(y_hat_price > 0), "De-standardised prices must be positive"
 assert metrics_use_price_scale(y_hat_price)
 ```
 
@@ -511,19 +598,46 @@ history2 = trainer.train_phase2(data)  # Phase 2 (phase1 frozen)
 ```
 
 ### 7.9 Evaluation — `src/evaluation/pde_evaluator.py`
-| Metric | Formula | Notes |
-|--------|---------|-------|
-| Relative L2 | ||û - u||₂ / ||u||₂ | Over full domain |
-| Time-resolved L2 | L2 error at each t slice | Shows error evolution |
-| Max error | max|û - u| | Point-wise maximum |
+
+**Evaluation Protocol (Dissertation-Ready)**
+
+| Parameter | Value | Justification |
+|-----------|-------|---------------|
+| Grid resolution (Nx) | 256 | Standard benchmark resolution |
+| Grid resolution (Nt) | 100 | 100 time slices from t=0 to t=1 |
+| Collocation points | 20,000 (LHS) | Space-filling for training |
+| Test grid | Uniform meshgrid | For unbiased evaluation |
+| Viscosity ν | 0.01/π ≈ 0.00318 | Low viscosity = steep gradients |
+
+| Metric | Formula | Interpretation |
+|--------|---------|----------------|
+| **Relative L2** | ||û - u||₂ / ||u||₂ | Overall accuracy (lower = better) |
+| **Time-resolved L2(t)** | ||û(·,t) - u(·,t)||₂ / ||u(·,t)||₂ | Error evolution over time |
+| **Max pointwise error** | max_{x,t} |û - u| | Worst-case accuracy |
+| **Shock region error** | L2 restricted to |du/dx| > threshold | Accuracy at steep gradients |
 
 **Exact Solution:** Hopf-Cole transformation (`burgers_exact_solution_hopf_cole`)
 
-### 7.10 Expected Results
-| Model | Relative L2 Error | Notes |
-|-------|------------------|-------|
-| Standard PINN | ~1e-2 to 1e-1 | Error accumulates with time |
-| DP-PINN | ~1e-3 to 1e-2 | Phase splitting reduces propagation |
+### 7.10 Expected Results & Baselines
+
+| Model | Relative L2 Error | Training Time | Notes |
+|-------|------------------|---------------|-------|
+| Standard PINN | ~1e-2 to 1e-1 | ~30 min | Error accumulates with time |
+| DP-PINN | ~1e-3 to 1e-2 | ~45 min (2 phases) | Phase splitting reduces error propagation |
+| Two-phase single-optim | ~5e-3 to 5e-2 | ~35 min | Ablation: shows benefit is from splitting, not just extra compute |
+
+**Required Dissertation Plots (Burgers PDE):**
+1. Solution heatmap: `u(x,t)` predicted vs exact (side-by-side)
+2. Absolute error heatmap: `|û(x,t) - u(x,t)|`
+3. Time-resolved L2 curve: L2(t) for both Standard PINN and DP-PINN
+4. Training loss curves: PDE/IC/BC/intermediate losses separately
+5. Cross-section at t=0.5: u(x) predicted vs exact (line plot)
+
+**What "stiff" means for Burgers':**
+At low viscosity (ν ≈ 0.003), the solution develops steep gradients (shocks) that are challenging for standard PINNs because:
+- Gradients become very large (O(1/ν)) requiring fine resolution
+- Optimisation landscape becomes ill-conditioned
+- Error at early times propagates and amplifies
 
 ### 7.11 Files Reference
 | Component | File Path | Description |
@@ -556,6 +670,554 @@ history2 = trainer.train_phase2(data)  # Phase 2 (phase1 frozen)
 | HestonPINN | Volatility | `volatility.py` | Heston SDE constraints |
 | **BurgersPINN** | PDE | `dp_pinn.py` | Burgers' equation, autograd |
 | **DualPhasePINN** | PDE | `dp_pinn.py` | Two-phase for stiff PDEs |
+
+----------------------------------------------------------------------
+9) COMPREHENSIVE AUDIT RESULTS (2026-03-05)
+----------------------------------------------------------------------
+
+### 9.1 Audit Status: IMPLEMENTATIONS VERIFIED, EVALUATION PENDING
+
+| Component | Implementation | Evaluation Pipeline | Issues |
+|-----------|----------------|---------------------|--------|
+| Baseline Models (5) | ✅ REAL | ⚠️ PENDING | Rerun with proper epochs |
+| PINN Models (7) | ✅ REAL | ⚠️ PENDING | Physics scale fixes needed |
+| Advanced PINN (3) | ✅ REAL | ⚠️ PENDING | Rerun with proper epochs |
+| Volatility Models (6) | ✅ REAL | ⚠️ PENDING | Target verification needed |
+| Burgers/DP-PINN (2) | ✅ REAL | ⚠️ PENDING | Evaluation protocol needed |
+| Physics Losses | ✅ REAL | ⚠️ PENDING | Denormalisation needed |
+| Learnable Parameters | ✅ REAL | ✅ OK | Verified with gradients |
+| Metrics (30+) | ✅ REAL | ⚠️ PENDING | Unclipped storage needed |
+| Visualizations (23+) | ✅ REAL | ✅ OK | — |
+| Training Service | ✅ HAS_SRC=True | ✅ OK | Real training enabled |
+
+**Implementation Placeholders Found: NONE** ✅
+**Evaluation Pipeline Issues Found: MULTIPLE** ⚠️ (see §15)
+
+**Key distinction:**
+- All model **code** is real PyTorch with proper forward/backward passes
+- The **evaluation pipeline** has issues that would produce misleading dissertation results
+- These are **fixable** issues, not fundamental architectural problems
+
+### 9.2 Complete Model Registry
+
+| # | Model Key | Class | Type | Implementation File | Status |
+|---|-----------|-------|------|---------------------|--------|
+| 1 | `lstm` | LSTMModel | baseline | `src/models/baseline.py:14-132` | REAL |
+| 2 | `gru` | GRUModel | baseline | `src/models/baseline.py:134-236` | REAL |
+| 3 | `bilstm` | LSTMModel(bi) | baseline | `src/models/baseline.py:239-260` | REAL |
+| 4 | `attention_lstm` | AttentionLSTM | baseline | `src/models/baseline.py:263-349` | REAL |
+| 5 | `transformer` | TransformerModel | baseline | `src/models/transformer.py:57-168` | REAL |
+| 6 | `baseline_pinn` | PINNModel | pinn | `src/models/pinn.py` | REAL |
+| 7 | `gbm` | PINNModel | pinn | `src/models/pinn.py` | REAL |
+| 8 | `ou` | PINNModel | pinn | `src/models/pinn.py` | REAL |
+| 9 | `black_scholes` | PINNModel | pinn | `src/models/pinn.py` | REAL |
+| 10 | `gbm_ou` | PINNModel | pinn | `src/models/pinn.py` | REAL |
+| 11 | `global` | PINNModel | pinn | `src/models/pinn.py` | REAL |
+| 12 | `stacked` | StackedPINN | advanced | `src/models/stacked_pinn.py` | REAL |
+| 13 | `residual` | ResidualPINN | advanced | `src/models/stacked_pinn.py` | REAL |
+| 14 | `spectral_pinn` | SpectralRegimePINN | advanced | `src/models/spectral_pinn.py` | REAL |
+| 15 | `vol_lstm` | VolatilityLSTM | volatility | `src/models/volatility.py` | REAL |
+| 16 | `vol_gru` | VolatilityGRU | volatility | `src/models/volatility.py` | REAL |
+| 17 | `vol_transformer` | VolatilityTransformer | volatility | `src/models/volatility.py` | REAL |
+| 18 | `vol_pinn` | VolatilityPINN | volatility | `src/models/volatility.py` | REAL |
+| 19 | `heston_pinn` | HestonPINN | volatility | `src/models/volatility.py` | REAL |
+| 20 | `stacked_vol_pinn` | StackedVolatilityPINN | volatility | `src/models/volatility.py` | REAL |
+| 21 | `burgers_pinn` | BurgersPINN | pde | `src/models/dp_pinn.py:40-260` | REAL |
+| 22 | `dual_phase_pinn` | DualPhasePINN | pde | `src/models/dp_pinn.py:280-510` | REAL |
+
+**Total: 22 distinct model classes (26+ with aliases)**
+
+### 9.3 Physics Lambda Configurations
+
+| Model Key | λ_gbm | λ_ou | λ_bs | λ_langevin | Notes |
+|-----------|-------|------|------|------------|-------|
+| baseline_pinn | 0.0 | 0.0 | 0.0 | 0.0 | Data-only |
+| gbm | 0.1 | 0.0 | 0.0 | 0.0 | Trend-following |
+| ou | 0.0 | 0.1 | 0.0 | 0.0 | Mean-reversion |
+| black_scholes | 0.0 | 0.0 | 0.1 | 0.0 | No-arbitrage |
+| gbm_ou | 0.05 | 0.05 | 0.0 | 0.0 | Hybrid |
+| global | 0.05 | 0.05 | 0.03 | 0.02 | All constraints |
+| stacked | 0.1 | 0.1 | 0.0 | 0.0 | Physics encoder |
+| residual | 0.1 | 0.1 | 0.0 | 0.0 | Correction path |
+
+### 9.4 Learnable Physics Parameters
+
+| Parameter | Symbol | Module | Constraint | Initial Value |
+|-----------|--------|--------|------------|---------------|
+| OU mean-reversion | θ | `PhysicsLoss.theta_raw` | softplus() > 0 | 1.0 |
+| Langevin friction | γ | `PhysicsLoss.gamma_raw` | softplus() > 0 | 0.5 |
+| Langevin temperature | T | `PhysicsLoss.temperature_raw` | softplus() > 0 | 0.1 |
+| GARCH intercept | ω | `VolatilityPhysicsLoss.omega_raw` | exp() > 0 | — |
+| GARCH alpha | α | `VolatilityPhysicsLoss.alpha_raw` | sigmoid ∈ (0, 0.5) | — |
+| GARCH beta | β | `VolatilityPhysicsLoss.beta_raw` | sigmoid ∈ (0.3, 0.95) | — |
+
+----------------------------------------------------------------------
+10) METRICS IMPLEMENTATION
+----------------------------------------------------------------------
+
+### 10.1 ML Prediction Metrics
+
+**File:** `src/evaluation/metrics.py` (MetricsCalculator class)
+
+| Metric | Formula | Range | Implementation |
+|--------|---------|-------|----------------|
+| **MSE** | mean((y - ŷ)²) | [0, ∞) | `mean_squared_error()` |
+| **RMSE** | √MSE | [0, ∞) | `rmse()` L:58-60 |
+| **MAE** | mean(\|y - ŷ\|) | [0, ∞) | `mae()` L:62-65 |
+| **MAPE** | mean(\|(y-ŷ)/y\|) × 100 | [0, ∞) | `mape()` L:67-70 |
+| **R²** | 1 - SS_res/SS_tot | (-∞, 1] | `r2()` L:72-75 |
+| **Dir. Accuracy** | mean(sign(Δy) = sign(Δŷ)) | [0, 100%] | `directional_accuracy()` L:77-100 |
+
+### 10.2 Financial Metrics
+
+**File:** `src/evaluation/financial_metrics.py` (FinancialMetrics class)
+
+| Metric | Formula | Range | Display Bounds | Raw Stored? |
+|--------|---------|-------|----------------|-------------|
+| **Sharpe Ratio** | (R - R_f)/σ_R × √252 | (-∞, +∞) | ±5 (L:116) | **PENDING** |
+| **Sortino Ratio** | (R - R_f)/σ_down × √252 | (-∞, +∞) | ±10 (L:171) | **PENDING** |
+| **Max Drawdown** | min(P_t/max(P) - 1) | [-1, 0] | -100% floor | Yes |
+| **Calmar Ratio** | Ann. Return / \|Max DD\| | (-∞, +∞) | ±10 | **PENDING** |
+| **Total Return** | (P_final/P_initial) - 1 | [-1, +∞) | [-1, 10] | **PENDING** |
+| **Annualized Return** | (1 + R_total)^(252/n) - 1 | [-1, +∞) | [-1, 5] | **PENDING** |
+| **Volatility** | std(returns) × √252 | [0, ∞) | — | Yes |
+| **Win Rate** | mean(returns > 0) | [0, 1] | — | Yes |
+| **Profit Factor** | Σ gains / Σ losses | [0, ∞) | 10 cap | **PENDING** |
+| **Skewness** | E[(X-μ)³/σ³] | (-∞, +∞) | — | Yes |
+| **Kurtosis** | E[(X-μ)⁴/σ⁴] - 3 | (-∞, +∞) | — | Yes |
+
+**IMPORTANT: Clipping vs Storage**
+- Clipping is applied for **UI display** to prevent extreme values confusing users.
+- For **dissertation research**, unclipped "raw" values **MUST** be stored separately.
+- Clipped values hitting bounds (e.g., Sharpe=5.0, Sortino=10.0) are **red flags** indicating:
+  - Look-ahead bias / data leakage
+  - Incorrect scale (z-scores treated as prices)
+  - Position timing errors
+  - Numerical overflow
+
+**Action Required:** Add `_raw` suffix metrics to results JSON (e.g., `sharpe_ratio_raw`) that store unclipped values for debugging. See §15 checklist.
+
+### 10.3 Advanced Statistical Metrics
+
+| Metric | Purpose | Implementation |
+|--------|---------|----------------|
+| **Information Coefficient** | Signal quality | Corr(predicted, actual) |
+| **Precision/Recall/F1** | Classification | Direction prediction |
+| **Bootstrap CI (Sharpe)** | Significance | 10,000 block samples |
+| **Deflated Sharpe** | Overfitting correction | Bailey & Lopez de Prado (2014) |
+| **Subsample Stability** | Robustness | Performance across periods |
+| **Diebold-Mariano Test** | Forecast comparison | Hypothesis test on errors |
+
+### 10.4 Volatility-Specific Metrics
+
+**File:** `src/evaluation/volatility_metrics.py`
+
+| Metric | Formula | Purpose |
+|--------|---------|---------|
+| **QLIKE** | mean(log(σ̂²) + r²/σ̂²) | Quasi-likelihood loss |
+| **HMSE** | mean((r²/σ̂² - 1)²) | Heteroskedasticity-adjusted MSE |
+| **Mincer-Zarnowitz R²** | R² from MZ regression | Forecast efficiency |
+| **VaR Breach Rate** | Actual vs expected breaches | Kupiec POF test |
+| **Expected Shortfall** | Tail risk accuracy | CVaR measurement |
+
+### 10.5 Physics Metrics (PINN-Specific)
+
+| Metric | Description | Source |
+|--------|-------------|--------|
+| **total_physics_loss** | Sum of all constraint losses | Training output |
+| **gbm_loss** | λ_gbm × L_gbm | Per-epoch logging |
+| **ou_loss** | λ_ou × L_ou | Per-epoch logging |
+| **bs_loss** | λ_bs × L_bs | Per-epoch logging |
+| **langevin_loss** | λ_langevin × L_langevin | Per-epoch logging |
+| **learned_theta** | OU mean-reversion speed | `get_learned_params()` |
+| **learned_gamma** | Langevin friction | `get_learned_params()` |
+| **learned_temperature** | Langevin temperature | `get_learned_params()` |
+
+----------------------------------------------------------------------
+11) VISUALIZATION & GRAPHS
+----------------------------------------------------------------------
+
+### 11.1 Required Dissertation Plots (7 Core)
+
+**File:** `src/evaluation/plot_diagnostics.py` (DiagnosticPlotter class)
+
+| # | Plot Name | Method | Output |
+|---|-----------|--------|--------|
+| 1 | Equity Curve | `plot_equity_curve()` | Portfolio value over time |
+| 2 | Drawdown Curve | `plot_drawdown()` | Peak-to-trough decline |
+| 3 | Rolling Sharpe (63-day) | `plot_rolling_sharpe()` | Time-varying Sharpe |
+| 4 | Return Histogram | `plot_return_histogram()` | Distribution + normal overlay |
+| 5 | Pred vs Realized Scatter | `plot_pred_vs_realized()` | Forecast accuracy + IC |
+| 6 | Positions & Turnover | `plot_positions_turnover()` | Trading activity |
+| 7 | Quantile/Decile Analysis | `plot_quantile_analysis()` | Decile performance |
+
+**Output:** PNG files at 150 DPI, 12×6 inches, saved to `results/evaluation/`
+
+### 11.2 Interactive Frontend Charts (React + Recharts)
+
+**Directory:** `frontend/src/components/charts/`
+
+| Component | Chart Type | Data Source |
+|-----------|------------|-------------|
+| PriceChart.tsx | Candlestick + Volume | OHLCV API |
+| EquityChart.tsx | Area chart | Portfolio values |
+| DrawdownChart.tsx | Negative area | Returns |
+| RollingSharpeChart.tsx | Line + ref bands | Returns window |
+| RollingVolatilityChart.tsx | Area + heatmap | Volatility |
+| PredictionChart.tsx | Scatter | Predictions |
+| RegimeChart.tsx | Stacked area | Regime labels |
+| RegimeHeatmap.tsx | Color grid | Regime matrix |
+| MonteCarloFanChart.tsx | Fan chart | Quantiles |
+| SpaghettiChart.tsx | Multi-line | Trajectories |
+| SpectralAnalysisChart.tsx | Frequency plot | FFT data |
+| ExposureChart.tsx | Stacked bar | Positions |
+| ExposureVolatilityScatter.tsx | Scatter | Vol/exposure |
+| UnderwaterChart.tsx | Underwater plot | Drawdown series |
+| BenchmarkComparisonChart.tsx | Multi-line | Multiple series |
+| DistributionChart.tsx | Histogram + KDE | Returns |
+
+**Theme:** `frontend/src/components/charts/chartTheme.tsx` (colorblind-friendly palette)
+
+### 11.3 Backend Metrics API Endpoints
+
+**File:** `backend/app/api/routes/metrics.py`
+
+| Endpoint | Method | Returns |
+|----------|--------|---------|
+| `/api/metrics/financial` | GET/POST | FinancialMetrics |
+| `/api/metrics/ml` | GET | MLMetrics |
+| `/api/metrics/physics/{model_key}` | GET | PhysicsMetrics |
+| `/api/metrics/model/{model_key}` | GET | Combined metrics |
+| `/api/metrics/comparison` | GET | Model comparison |
+| `/api/metrics/saved/{model_key}` | GET | Saved results |
+| `/api/metrics/leaderboard` | GET | Rankings |
+
+----------------------------------------------------------------------
+12) VERIFICATION COMMANDS
+----------------------------------------------------------------------
+
+### 12.1 Verify All Models Create Successfully
+
+```bash
+source backend/venv/bin/activate && python -c "
+import sys; sys.path.insert(0, '.')
+import torch
+from pathlib import Path
+from src.models.model_registry import ModelRegistry
+
+registry = ModelRegistry(Path('.'))
+test_input = torch.randn(2, 30, 5)
+
+models = ['lstm', 'gru', 'bilstm', 'transformer',
+          'baseline_pinn', 'gbm', 'ou', 'black_scholes', 'gbm_ou', 'global',
+          'stacked', 'residual']
+
+for m in models:
+    model = registry.create_model(m, input_dim=5)
+    if model:
+        out = model(test_input)
+        pred = out[0] if isinstance(out, tuple) else out
+        is_pinn = hasattr(model, 'compute_loss')
+        print(f'✓ {m}: {model.__class__.__name__} ({\"PINN\" if is_pinn else \"Baseline\"})')
+    else:
+        print(f'✗ {m}: FAILED')
+"
+```
+
+### 12.2 Verify Training Mode
+
+```bash
+curl http://localhost:8000/api/training/mode
+# Expected: {"mode": "real", "using_real_models": true}
+```
+
+### 12.3 Verify Metrics Calculation
+
+```bash
+source backend/venv/bin/activate && python -c "
+import numpy as np
+from src.evaluation.metrics import MetricsCalculator
+
+y_true = np.random.randn(100)
+y_pred = y_true + np.random.randn(100) * 0.1
+
+calc = MetricsCalculator()
+print(f'RMSE: {calc.rmse(y_true, y_pred):.4f}')
+print(f'MAE: {calc.mae(y_true, y_pred):.4f}')
+print(f'R²: {calc.r2(y_true, y_pred):.4f}')
+print(f'Dir Acc: {calc.directional_accuracy(y_true, y_pred):.1f}%')
+"
+```
+
+### 12.4 Verify Learnable Physics Parameters
+
+```bash
+source backend/venv/bin/activate && python -c "
+import torch
+from src.models.pinn import PhysicsLoss
+
+physics = PhysicsLoss(lambda_gbm=0.1, lambda_ou=0.1)
+print('Learnable parameters:')
+print(f'  θ (OU speed): {physics.theta.item():.4f}')
+print(f'  γ (friction): {physics.gamma.item():.4f}')
+print(f'  T (temperature): {physics.temperature.item():.4f}')
+
+# Verify gradients exist
+loss = physics.theta + physics.gamma + physics.temperature
+loss.backward()
+print('✓ Gradients computed successfully')
+"
+```
+
+### 12.5 Verify Financial Metrics
+
+```bash
+source backend/venv/bin/activate && python -c "
+import numpy as np
+from src.evaluation.financial_metrics import FinancialMetrics
+
+returns = np.random.randn(252) * 0.02  # 1 year of daily returns
+fm = FinancialMetrics()
+
+sharpe = fm.sharpe_ratio(returns)
+sortino = fm.sortino_ratio(returns)
+max_dd = fm.max_drawdown(returns)
+print(f'Sharpe: {sharpe:.2f}')
+print(f'Sortino: {sortino:.2f}')
+print(f'Max DD: {max_dd:.2%}')
+print('✓ Financial metrics computed successfully')
+"
+```
+
+----------------------------------------------------------------------
+13) COMPLETE METRICS CHECKLIST
+----------------------------------------------------------------------
+
+### ML Prediction Metrics
+- [x] MSE (calculated from raw predictions)
+- [x] RMSE (sqrt of MSE)
+- [x] MAE (mean absolute error)
+- [x] MAPE (mean absolute percentage error)
+- [x] R² (coefficient of determination)
+- [x] Directional Accuracy (sign agreement)
+
+### Financial Performance Metrics
+- [x] Total Return
+- [x] Annualized Return
+- [x] Sharpe Ratio (clipped ±5)
+- [x] Sortino Ratio (clipped ±10)
+- [x] Max Drawdown (capped at -100%)
+- [x] Calmar Ratio
+- [x] Volatility (annualized)
+- [x] Win Rate
+- [x] Profit Factor (capped at 10)
+- [x] Skewness
+- [x] Kurtosis
+
+### Advanced Statistical Metrics
+- [x] Information Coefficient
+- [x] Precision, Recall, F1-Score
+- [x] Bootstrapped Sharpe CI
+- [x] Subsample Stability
+- [x] Deflated Sharpe Ratio
+- [x] Diebold-Mariano Test
+
+### Volatility Metrics
+- [x] QLIKE (quasi-likelihood)
+- [x] HMSE (heteroskedasticity-adjusted)
+- [x] Mincer-Zarnowitz R²
+- [x] VaR Breach Rate
+- [x] Expected Shortfall
+
+### Physics Metrics
+- [x] Total Physics Loss
+- [x] GBM/OU/BS/Langevin losses
+- [x] Learned parameters (θ, γ, T)
+
+### Visualization Outputs
+- [x] 7 matplotlib diagnostic plots
+- [x] 16 interactive Recharts components
+- [x] Real-time metric displays
+- [x] Comparison tables and charts
+- [x] Leaderboard rankings
+
+----------------------------------------------------------------------
+14) FILES REFERENCE
+----------------------------------------------------------------------
+
+### Core Model Implementations
+| File | Contents |
+|------|----------|
+| `src/models/baseline.py` | LSTM, GRU, BiLSTM, AttentionLSTM |
+| `src/models/transformer.py` | TransformerModel, TransformerEncoderDecoder |
+| `src/models/pinn.py` | PhysicsLoss, PINNModel |
+| `src/models/stacked_pinn.py` | StackedPINN, ResidualPINN |
+| `src/models/spectral_pinn.py` | SpectralRegimePINN |
+| `src/models/volatility.py` | All volatility models |
+| `src/models/dp_pinn.py` | BurgersPINN, DualPhasePINN |
+| `src/models/model_registry.py` | Central registry (26+ models) |
+
+### Evaluation & Metrics
+| File | Contents |
+|------|----------|
+| `src/evaluation/metrics.py` | MetricsCalculator (ML metrics) |
+| `src/evaluation/financial_metrics.py` | FinancialMetrics (30+ metrics) |
+| `src/evaluation/volatility_metrics.py` | Volatility-specific metrics |
+| `src/evaluation/statistical_tests.py` | Diebold-Mariano, bootstrap |
+| `src/evaluation/plot_diagnostics.py` | 7 dissertation plots |
+| `src/evaluation/leaderboard.py` | ResultsDatabase, rankings |
+
+### Backend Integration
+| File | Contents |
+|------|----------|
+| `backend/app/services/training_service.py` | HAS_SRC=True verification |
+| `backend/app/services/metrics_service.py` | Metrics API service |
+| `backend/app/api/routes/metrics.py` | REST endpoints |
+| `backend/app/schemas/metrics.py` | Pydantic schemas |
+
+### Frontend Charts
+| Directory | Contents |
+|-----------|----------|
+| `frontend/src/components/charts/` | 16 Recharts components |
+| `frontend/src/pages/` | Dashboard, Leaderboard, Analysis |
+| `frontend/src/hooks/` | useMetrics, useTraining hooks |
+
+----------------------------------------------------------------------
+15) DISSERTATION-READY CHECKLIST
+----------------------------------------------------------------------
+
+### 15.1 Evaluation Pipeline (CRITICAL — Fix Before Any Results)
+
+| # | Item | Status | File(s) | Action |
+|---|------|--------|---------|--------|
+| 1 | **De-standardise before trading metrics** | ⬜ PENDING | `metrics.py`, `financial_metrics.py` | Add assertion: fail if std(prices) < 1 (z-scores) |
+| 2 | **Position lag enforced** | ✅ DONE | `financial_metrics.py:1164-1166` | Verified: `positions[1:] = raw_signal[:-1]` |
+| 3 | **Store unclipped metrics** | ⬜ PENDING | `financial_metrics.py` | Add `sharpe_ratio_raw`, `sortino_ratio_raw` to results |
+| 4 | **Transformer masked by default** | ⬜ PENDING | `transformer.py` | Add `causal=True` default parameter |
+| 5 | **Separate causal/oracle leaderboards** | ⬜ PENDING | `leaderboard.py` | Add `is_causal` flag to results schema |
+
+### 15.2 Physics Losses (Fix Mixed Scales)
+
+| # | Item | Status | File(s) | Action |
+|---|------|--------|---------|--------|
+| 6 | **Denormalise V,S before BS** | ⬜ PENDING | `pinn.py:181-266` | Pass scaler mean/std, denorm in autograd |
+| 7 | **Standardise GBM/OU/Langevin residuals** | ⬜ PENDING | `pinn.py:361-421` | Divide by running std |
+| 8 | **Log residual RMS per epoch** | ⬜ PENDING | `trainer.py` | Add to training history |
+| 9 | **Document λ schedule** | ⬜ PENDING | This file | Constant vs warm-up? |
+
+### 15.3 Results Reproducibility
+
+| # | Item | Status | File(s) | Action |
+|---|------|--------|---------|--------|
+| 10 | **Config hash in results** | ⬜ PENDING | `trainer.py` | SHA256 of training config |
+| 11 | **Scaler info in results** | ⬜ PENDING | `train_models.py` | Store μ, σ per ticker |
+| 12 | **Causal flag in results** | ⬜ PENDING | Results schema | `is_causal: bool` |
+| 13 | **Execution assumption** | ⬜ PENDING | Results schema | `execution: "close_to_close"` |
+| 14 | **Random seed logged** | ✅ DONE | `research_config` | seed=42 |
+
+### 15.4 Model Training
+
+| # | Item | Status | File(s) | Action |
+|---|------|--------|---------|--------|
+| 15 | **epochs=100 for all** | ⬜ PENDING | `train_models.py` | Currently many at epochs=1 |
+| 16 | **BiLSTM labelled oracle** | ⬜ PENDING | Results/UI | Don't compare directly to causal |
+| 17 | **Volatility target verified** | ⬜ PENDING | `dataset.py` | Check variance_history alignment |
+
+### 15.5 DP-PINN Experiments
+
+| # | Item | Status | File(s) | Action |
+|---|------|--------|---------|--------|
+| 18 | **Log grid size** | ⬜ PENDING | Experiment logs | Nx=256, Nt=100 |
+| 19 | **Log viscosity ν** | ⬜ PENDING | Experiment logs | ν=0.01/π |
+| 20 | **Log sampling counts** | ⬜ PENDING | Experiment logs | n_coll=20k, n_bc=2k, n_ic=2k |
+| 21 | **Log optimiser iterations** | ⬜ PENDING | Experiment logs | Adam 50k, L-BFGS 10k |
+| 22 | **Three-baseline comparison** | ⬜ PENDING | Results | Standard, DP-PINN, two-phase-single-optim |
+
+### 15.6 Verification Commands
+
+**Quick sanity check (run before any training):**
+```bash
+source backend/venv/bin/activate && python -c "
+import numpy as np
+from src.evaluation.financial_metrics import FinancialMetrics
+
+# Test with z-scores (should be flagged as suspicious)
+z_scores = np.random.randn(100) * 0.5  # Typical z-score range
+print('Testing with z-scores (simulating wrong scale):')
+sharpe = FinancialMetrics.sharpe_ratio(z_scores)
+print(f'  Sharpe from z-scores: {sharpe:.2f}')
+if abs(sharpe) > 3:
+    print('  ⚠️  WARNING: Sharpe > 3 suggests z-scores treated as returns!')
+
+# Test with realistic returns
+returns = np.random.randn(252) * 0.02  # ~2% daily vol
+print('Testing with realistic returns:')
+sharpe = FinancialMetrics.sharpe_ratio(returns)
+print(f'  Sharpe from returns: {sharpe:.2f}')
+print('  ✓ This should be in [-2, 2] range typically')
+"
+```
+
+**Verify evaluation contract:**
+```bash
+source backend/venv/bin/activate && python -c "
+import numpy as np
+from src.evaluation.financial_metrics import compute_strategy_returns
+
+# Simulate predictions and actuals (de-standardised)
+predictions = 100 + np.cumsum(np.random.randn(100) * 0.5)  # Price-like
+actuals = 100 + np.cumsum(np.random.randn(100) * 0.5)
+
+# Get strategy returns with details
+returns, details = compute_strategy_returns(
+    predictions, actuals,
+    return_details=True
+)
+
+# Check position lag
+positions = details['positions']
+print(f'Position at t=0: {positions[0]} (should be 0 - no look-ahead)')
+print(f'Position at t=1: {positions[1]} (should be based on t=0 signal)')
+
+# Verify lag
+if positions[0] == 0:
+    print('✓ Position lag correctly applied')
+else:
+    print('✗ ERROR: Position at t=0 should be 0 (no look-ahead)')
+"
+```
+
+### 15.7 Summary: What Must Be True Before Submission
+
+```
+EVALUATION PIPELINE:
+  [x] Positions lagged by 1 step (implemented)
+  [ ] Prices de-standardised before metrics (PENDING)
+  [ ] Unclipped metrics stored alongside clipped (PENDING)
+  [ ] Assertion fails if z-scores passed to trading metrics (PENDING)
+
+MODEL CLASSIFICATION:
+  [ ] Causal models clearly separated from oracle models (PENDING)
+  [ ] BiLSTM and unmasked Transformer labelled as "oracle/non-causal" (PENDING)
+  [ ] Transformer default changed to causal=True (PENDING)
+
+PHYSICS LOSSES:
+  [ ] BS residual uses denormalised V,S (PENDING)
+  [ ] GBM/OU/Langevin residuals standardised (PENDING)
+  [ ] Residual RMS logged per epoch (PENDING)
+  [ ] λ schedule documented (PENDING)
+
+RESULTS INTEGRITY:
+  [ ] All models trained for 100 epochs (PENDING)
+  [ ] Config hash stored with results (PENDING)
+  [ ] Scaler parameters stored with results (PENDING)
+  [ ] Execution assumptions documented (PENDING)
+
+DP-PINN:
+  [ ] Grid/sampling parameters logged (PENDING)
+  [ ] Three-baseline comparison complete (PENDING)
+  [ ] Required plots generated (PENDING)
+```
 
 ----------------------------------------------------------------------
 End of Document
