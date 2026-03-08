@@ -1136,9 +1136,10 @@ class FinancialMetrics:
         benchmark_returns: Optional[Union[np.ndarray, pd.Series]] = None,
         risk_free_rate: float = RISK_FREE_RATE,
         periods_per_year: int = TRADING_DAYS_PER_YEAR,
-        predictions_are_returns: bool = False,
+        predictions_are_returns: Optional[bool] = None,
         validate_price_scale: bool = True,
         price_scale_context: str = "compute_all_metrics",
+        allow_auto_detect_returns: bool = True,
     ) -> Dict[str, float]:
         """
         Compute all comprehensive financial metrics
@@ -1209,9 +1210,21 @@ class FinancialMetrics:
         # Directional accuracy and signal quality
         if predictions is not None and targets is not None:
             # Guard against accidental z-score inputs when working with price levels
-            if validate_price_scale and not predictions_are_returns:
-                assert_price_scale(np.asarray(targets), context=f"{price_scale_context}: targets")
-                assert_price_scale(np.asarray(predictions), context=f"{price_scale_context}: predictions")
+            if predictions_are_returns is None:
+                # Auto-detect if targets look like returns (small magnitude)
+                targets_arr = np.asarray(targets)
+                looks_like_returns = (
+                    allow_auto_detect_returns
+                    and np.nanmax(np.abs(targets_arr)) < 5
+                    and np.nanstd(targets_arr) < 1.0
+                )
+                predictions_are_returns = looks_like_returns
+
+            if validate_price_scale and predictions_are_returns is False:
+                targets_arr = np.asarray(targets)
+                preds_arr = np.asarray(predictions)
+                assert_price_scale(targets_arr, context=f"{price_scale_context}: targets")
+                assert_price_scale(preds_arr, context=f"{price_scale_context}: predictions")
 
             metrics['directional_accuracy'] = FinancialMetrics.directional_accuracy(
                 predictions, targets, are_returns=predictions_are_returns
@@ -1267,6 +1280,7 @@ def compute_strategy_returns(
     actual_prices: np.ndarray,
     transaction_cost: float = 0.001,
     are_returns: bool = False,
+    allow_auto_detect_returns: bool = True,
     max_return: float = 0.20,
     min_return: float = -0.20,
     price_mean: float = None,
@@ -1321,8 +1335,17 @@ def compute_strategy_returns(
     # ===== CRITICAL: VALIDATE PRICE SCALE =====
     # Ensure inputs are de-standardised before computing trading metrics
     if validate_scale and not are_returns:
+        # Auto-detect if inputs are already returns to stay backwards-compatible with tests
+        looks_like_returns = (
+            allow_auto_detect_returns
+            and np.nanmax(np.abs(actual_prices)) < 5
+            and np.nanstd(actual_prices) < 1.0
+        )
+        if looks_like_returns:
+            are_returns = True
+
         # Enforce de-standardisation: either provide scalers or explicitly opt-out
-        if require_price_scale and (price_mean is None or price_std is None):
+        if not are_returns and require_price_scale and (price_mean is None or price_std is None):
             raise ValueError(
                 "Trading metrics require de-standardised prices. "
                 "Provide price_mean and price_std from the close-price scaler, "

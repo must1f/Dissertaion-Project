@@ -104,7 +104,6 @@ cd frontend && npm run dev
 - **Training Service**: `backend/app/services/training_service.py` - Must use HAS_SRC=True
 - **PINN Models**: `src/models/pinn.py` - Physics-informed neural networks
 - **Stacked/Residual PINN**: `src/models/stacked_pinn.py` - Advanced architectures
-- **Project Documentation**: `DOCUMENT.md` - All changes must be documented here
 
 ## CRITICAL: Documentation Requirements
 
@@ -128,6 +127,7 @@ This is a dissertation/research project. Proper documentation is essential for:
 ### Documentation Format
 
 Follow the existing format in `DOCUMENT.md`:
+0. Don't read the entire file in order to save tokens
 1. Add a new numbered section (e.g., `## 14. Feature Name`)
 2. Include date and overview
 3. Provide code snippets with before/after comparisons

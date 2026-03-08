@@ -109,6 +109,7 @@ class Trainer:
         device: Optional[torch.device] = None,
         research_mode: bool = False,
         batch_callback: Optional[callable] = None,
+        run_metadata: Optional[dict] = None,
     ):
         """
         Initialize trainer
@@ -139,6 +140,7 @@ class Trainer:
         self.test_loader = test_loader
         self.checkpointer = ModelCheckpointer(self.config.checkpoint_dir)
         self.model_registry = ModelRegistry(self.config.project_root / "Models" / "registry.json")
+        self.run_metadata = run_metadata or {}
 
         # Determine learning rate and regularization based on mode
         if research_mode and self.research_config:
@@ -669,13 +671,36 @@ class Trainer:
         all_predictions = np.concatenate(all_predictions).flatten()
         all_targets = np.concatenate(all_targets).flatten()
 
-        metrics = calculate_metrics(all_targets, all_predictions, prefix="test_")
+        from ..evaluation.reporting import summarize_metrics
+        from ..utils.tracking import save_run
 
-        logger.info("\nTest Results:")
-        for key, value in metrics.items():
+        report = summarize_metrics(all_targets, all_predictions, prefix="test_")
+
+        logger.info("\nTest Results (forecasting):")
+        for key, value in report["forecasting"].items():
             logger.info(f"{key}: {value:.4f}")
 
-        return metrics
+        logger.info("\nTest Results (financial):")
+        for key, value in report["financial"].items():
+            logger.info(f"{key}: {value:.4f}")
+
+        if report.get("regime"):
+            logger.info("\nTest Results (regime slices):")
+            for key, value in report["regime"].items():
+                logger.info(f"{key}: {value:.4f}")
+
+        # Persist run summary with metadata if available
+        run_meta = self.run_metadata.copy()
+        run_meta.setdefault("research_mode", self.research_mode)
+        run_meta.setdefault("device", str(self.device))
+        run_meta.setdefault("model_class", self.model.__class__.__name__)
+        out_dir = Path(self.config.output_dir) if hasattr(self.config, "output_dir") else Path("outputs")
+        try:
+            save_run(out_dir, run_meta, report)
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"Failed to save run summary: {exc}")
+
+        return report
 
     @torch.no_grad()
     def get_predictions(self, data_loader: Optional[DataLoader] = None) -> Tuple[np.ndarray, np.ndarray]:

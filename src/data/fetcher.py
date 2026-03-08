@@ -3,16 +3,11 @@ Data fetcher for financial time series data from multiple sources
 """
 
 import time
-from typing import List, Optional, Dict
+from pathlib import Path
+from typing import List, Optional, Dict, cast
 from datetime import datetime
 import pandas as pd
 import yfinance as yf
-
-# Alpha Vantage is optional; if missing we degrade gracefully to yfinance-only.
-try:  # pragma: no cover
-    from alpha_vantage.timeseries import TimeSeries
-except ImportError:
-    TimeSeries = None
 
 # tqdm is optional; provide a no-op fallback so training doesn't fail
 try:  # pragma: no cover
@@ -24,6 +19,9 @@ except ImportError:
 from ..utils.config import get_config
 from ..utils.logger import get_logger
 from ..utils.database import get_db
+from .cache import CacheManager
+from .universe import universe_from_config, UniverseDefinition
+from .quality import run_qa
 
 logger = get_logger(__name__)
 
@@ -44,22 +42,13 @@ class DataFetcher:
         """
         self.config = config or get_config()
         self.db = get_db()
-        
+        cache_root = Path(self.config.data_dir) / "raw_cache"
+        self.cache = CacheManager(cache_root)
+
         # Check database connection status
         if not self.db.is_connected():
             logger.warning("Database not available, will use Parquet files for data storage")
 
-        # Alpha Vantage setup (if API key available)
-        self.alpha_vantage = None
-        if self.config.api.alpha_vantage_key:
-            try:
-                self.alpha_vantage = TimeSeries(
-                    key=self.config.api.alpha_vantage_key,
-                    output_format='pandas'
-                )
-                logger.info("Alpha Vantage API initialized")
-            except Exception as e:
-                logger.warning(f"Failed to initialize Alpha Vantage: {e}")
 
     def fetch_yfinance(
         self,
@@ -96,12 +85,12 @@ class DataFetcher:
                     auto_adjust=False,  # Keep unadjusted prices for trading
                 )
 
-                if data.empty:
+                if not isinstance(data, pd.DataFrame) or data.empty:
                     logger.warning(f"No data returned for {ticker}")
                     continue
 
                 # Prepare DataFrame
-                df = data.copy()
+                df = cast(pd.DataFrame, pd.DataFrame(data.copy()))
 
                 # Flatten MultiIndex columns if present (yfinance sometimes returns MultiIndex)
                 if isinstance(df.columns, pd.MultiIndex):
@@ -118,11 +107,15 @@ class DataFetcher:
                     'Adj Close': 'adjusted_close'
                 })
 
+                # Some instruments may not provide adjusted_close; fall back to close.
+                if 'adjusted_close' not in df.columns and 'close' in df.columns:
+                    df['adjusted_close'] = df['close']
+
                 # Select and reorder columns
-                df = df[['time', 'ticker', 'open', 'high', 'low', 'close', 'volume', 'adjusted_close']]
+                df = df[['time', 'ticker', 'open', 'high', 'low', 'close', 'volume', 'adjusted_close']].copy()
 
                 # Remove timezone info for database compatibility
-                df['time'] = pd.to_datetime(df['time']).dt.tz_localize(None)
+                df['time'] = pd.DatetimeIndex(pd.to_datetime(df['time'], errors='coerce')).tz_localize(None)
 
                 all_data.append(df)
 
@@ -142,60 +135,6 @@ class DataFetcher:
         logger.info(f"Successfully fetched {len(combined_df)} records for {len(all_data)} tickers")
 
         return combined_df
-
-    def fetch_alpha_vantage(
-        self,
-        ticker: str,
-        outputsize: str = 'full'
-    ) -> pd.DataFrame:
-        """
-        Fetch data using Alpha Vantage (backup source)
-
-        Args:
-            ticker: Ticker symbol
-            outputsize: 'compact' (last 100 points) or 'full' (20+ years)
-
-        Returns:
-            DataFrame with stock prices
-        """
-        if not self.alpha_vantage:
-            logger.warning("Alpha Vantage not configured")
-            return pd.DataFrame()
-
-        try:
-            logger.info(f"Fetching {ticker} from Alpha Vantage")
-
-            # Get daily adjusted data
-            data, meta_data = self.alpha_vantage.get_daily_adjusted(
-                symbol=ticker,
-                outputsize=outputsize
-            )
-
-            # Prepare DataFrame
-            df = data.copy()
-            df['ticker'] = ticker
-            df['time'] = df.index
-            df = df.rename(columns={
-                '1. open': 'open',
-                '2. high': 'high',
-                '3. low': 'low',
-                '4. close': 'close',
-                '6. volume': 'volume',
-                '5. adjusted close': 'adjusted_close'
-            })
-
-            df = df[['time', 'ticker', 'open', 'high', 'low', 'close', 'volume', 'adjusted_close']]
-            df['time'] = pd.to_datetime(df['time'])
-
-            # Alpha Vantage rate limit: 5 calls/minute (free tier)
-            time.sleep(12)
-
-            logger.info(f"Successfully fetched {len(df)} records for {ticker}")
-            return df
-
-        except Exception as e:
-            logger.error(f"Failed to fetch {ticker} from Alpha Vantage: {e}")
-            return pd.DataFrame()
 
     def fetch_and_store(
         self,
@@ -264,6 +203,67 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"Failed to save Parquet backup: {e}")
 
+        return df
+
+    def fetch_multi_asset_cached(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        interval: Optional[str] = None,
+        force_refresh: Optional[bool] = None,
+        dataset_tag: str = "raw_cache",
+    ) -> pd.DataFrame:
+        """
+        Universe-aware fetch with Parquet cache and QA report.
+        """
+
+        data_cfg = getattr(self.config, "data", None)
+        universe: UniverseDefinition = universe_from_config(data_cfg)
+        start_date = start_date or universe.start_date
+        end_date = end_date or universe.end_date
+        interval = interval or universe.interval
+        force_refresh = force_refresh if force_refresh is not None else getattr(data_cfg, "force_refresh", False)
+
+        cache_paths = self.cache.paths(
+            universe=universe,
+            start_date=start_date,
+            end_date=end_date,
+            interval=interval,
+            dataset_tag=dataset_tag,
+        )
+
+        ttl_days = getattr(data_cfg, "cache_ttl_days", None)
+
+        if not force_refresh:
+            cached, meta, _ = self.cache.load_with_meta(cache_paths, ttl_days=ttl_days)
+            if cached is not None and not cached.empty:
+                logger.info("Loaded multi-asset data from cache")
+                return cached
+
+        df = self.fetch_yfinance(universe.symbols, start_date, end_date, interval)
+        if df.empty:
+            logger.error("No data returned for universe fetch")
+            return df
+
+        qa_report = run_qa(df)
+        metadata = {
+            "source": "yfinance",
+            "force_refresh": force_refresh,
+            "tickers": universe.symbols,
+            "start_date": start_date,
+            "end_date": end_date,
+            "interval": interval,
+            "cache_key": cache_paths.cache_key(),
+            "universe_hash": universe.hash(),
+        }
+        self.cache.save(
+            cache_paths,
+            df,
+            metadata=metadata,
+            qa_report=qa_report,
+        )
+
+        logger.info("Saved multi-asset data to cache")
         return df
 
     def load_from_parquet(self, filename: str) -> pd.DataFrame:

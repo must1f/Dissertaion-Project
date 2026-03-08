@@ -10,7 +10,7 @@ Performance optimizations:
 - Provides Streamlit-compatible caching decorator
 """
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Literal, cast
 from pathlib import Path
 from dataclasses import dataclass
 import json
@@ -25,7 +25,7 @@ from ..utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Module-level cache for checkpoint locations (avoids repeated filesystem scans)
-_checkpoint_cache: Dict[str, Dict] = {}
+_checkpoint_cache: Dict[str, Path] = {}
 _cache_timestamp: float = 0
 _CACHE_TTL_SECONDS = 60  # Cache checkpoint locations for 60 seconds
 
@@ -377,7 +377,7 @@ class ModelRegistry:
 
         # Use cached checkpoint locations if available and not expired
         if _checkpoint_cache and (current_time - _cache_timestamp) < _CACHE_TTL_SECONDS:
-            checkpoint_map = _checkpoint_cache
+            checkpoint_map: Dict[str, Path] = _checkpoint_cache
             logger.debug("Using cached checkpoint locations")
         else:
             # Build checkpoint map using glob (single filesystem scan)
@@ -423,7 +423,7 @@ class ModelRegistry:
         1. Single filesystem traversal instead of multiple exists() calls
         2. Results cached for subsequent calls
         """
-        checkpoint_map = {}
+        checkpoint_map: Dict[str, Path] = {}
 
         # Scan main models directory
         if self.models_dir.exists():
@@ -679,14 +679,13 @@ class ModelRegistry:
                 )
 
             elif architecture == 'AttentionLSTM':
-                from .baseline import LSTMModel
-                # Attention LSTM uses same base with attention layer
-                return LSTMModel(
+                from .baseline import AttentionLSTM
+                return AttentionLSTM(
                     input_dim=input_dim,
                     hidden_dim=hidden_dim,
                     num_layers=num_layers,
                     output_dim=1,
-                    dropout=dropout
+                    dropout=dropout,
                 )
 
             elif architecture == 'Transformer':
@@ -730,9 +729,10 @@ class ModelRegistry:
 
             elif architecture == 'ResidualPINN':
                 from .stacked_pinn import ResidualPINN
+                base_model_literal = cast(Literal['lstm', 'gru'], 'gru' if base_model == 'gru' else 'lstm')
                 return ResidualPINN(
                     input_dim=input_dim,
-                    base_model_type=base_model,
+                    base_model_type=base_model_literal,
                     base_hidden_dim=hidden_dim,
                     correction_hidden_dim=max(hidden_dim // 2, 32),
                     num_base_layers=num_layers,
@@ -798,7 +798,7 @@ class ModelRegistry:
                     lambda_feller=physics.get('lambda_feller', 0.05),
                     lambda_leverage=physics.get('lambda_leverage', 0.05),
                     lambda_heston=physics.get('lambda_heston', 0.0),
-                    enable_heston_constraint=physics.get('enable_heston_constraint', False)
+                    enable_heston_constraint=cast(bool, physics.get('enable_heston_constraint', False))
                 )
 
             elif architecture == 'HestonPINN':
@@ -977,8 +977,8 @@ class ModelRegistry:
                 )
 
             elif architecture == 'AttentionLSTM':
-                from .baseline import LSTMModel
-                return LSTMModel(
+                from .baseline import AttentionLSTM
+                return AttentionLSTM(
                     input_dim=input_dim,
                     hidden_dim=hidden_dim,
                     num_layers=num_layers,

@@ -55,12 +55,10 @@ class APIConfig(BaseModel):
 class DataConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
     """Data processing configuration"""
-    start_date: str = Field(
-        default_factory=lambda: os.getenv("START_DATE") or get_dynamic_date_range(10)[0]
-    )
-    end_date: str = Field(
-        default_factory=lambda: os.getenv("END_DATE") or get_dynamic_date_range(10)[1]
-    )
+    start_date: str = Field(default_factory=lambda: os.getenv("START_DATE") or get_dynamic_date_range(10)[0])
+    end_date: str = Field(default_factory=lambda: os.getenv("END_DATE") or get_dynamic_date_range(10)[1])
+    interval: str = Field(default_factory=lambda: os.getenv("INTERVAL", "1d"))
+
     train_ratio: float = Field(default_factory=lambda: float(os.getenv("TRAIN_RATIO", "0.7")))
     val_ratio: float = Field(default_factory=lambda: float(os.getenv("VAL_RATIO", "0.15")))
     test_ratio: float = Field(default_factory=lambda: float(os.getenv("TEST_RATIO", "0.15")))
@@ -68,13 +66,41 @@ class DataConfig(BaseModel):
     sequence_length: int = 60  # Number of time steps to look back
     forecast_horizon: int = 1  # Number of steps to predict ahead
 
-    # S&P 500 constituents (top 50 for MVP, can expand)
-    tickers: list[str] = Field(default_factory=lambda: [
-        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ',
-        'V', 'XOM', 'WMT', 'JPM', 'PG', 'MA', 'HD', 'CVX', 'ABBV', 'MRK',
-        'COST', 'PEP', 'KO', 'AVGO', 'ADBE', 'MCD', 'TMO', 'CSCO', 'ACN', 'LLY',
-        'NKE', 'DHR', 'ABT', 'VZ', 'TXN', 'NEE', 'CRM', 'WFC', 'ORCL', 'DIS',
-        'CMCSA', 'PM', 'BMY', 'INTC', 'QCOM', 'UPS', 'HON', 'MS', 'RTX', 'AMGN'
+    universe_name: str = Field(default_factory=lambda: os.getenv("UNIVERSE_NAME", "core_multi_asset"))
+    target_symbol: str = Field(default_factory=lambda: os.getenv("TARGET_SYMBOL", "SPY"))
+    target_type: str = Field(default_factory=lambda: os.getenv("TARGET_TYPE", "next_day_log_return"))
+    target_column: str = Field(default_factory=lambda: os.getenv("TARGET_COLUMN", "target"))
+    target_vol_window: int = Field(default_factory=lambda: int(os.getenv("TARGET_VOL_WINDOW", "5")))
+    price_column: str = Field(default_factory=lambda: os.getenv("PRICE_COLUMN", "adjusted_close"))
+    calendar: str = Field(default_factory=lambda: os.getenv("CALENDAR", "NYSE"))
+    master_calendar_holidays: list[str] = Field(default_factory=list)
+    cache_dir: str = Field(default_factory=lambda: os.getenv("CACHE_DIR", "cache"))
+    cache_ttl_days: int = Field(default_factory=lambda: int(os.getenv("CACHE_TTL_DAYS", "3")))
+    force_refresh: bool = Field(default_factory=lambda: os.getenv("FORCE_REFRESH", "false").lower() == "true")
+
+    # Calendar/fill policy
+    default_forward_fill_limit: int = Field(default_factory=lambda: int(os.getenv("DEFAULT_FFILL_LIMIT", "1")))
+    per_symbol_forward_fill_limit: dict[str, int] = Field(default_factory=lambda: {
+        "^VIX": 0,
+        "^TNX": 0,
+    })
+    disable_qa: bool = Field(default_factory=lambda: os.getenv("DISABLE_QA", "false").lower() == "true")
+    missing_policy: str = Field(default_factory=lambda: os.getenv("MISSING_POLICY", "leakage_safe"))
+    scaling_policy: str = Field(default_factory=lambda: os.getenv("SCALING_POLICY", "train_only"))
+
+    # Multi-asset baseline universe (stable core + optional overlays)
+    base_universe: list[str] = Field(default_factory=lambda: [
+        'SPY', 'QQQ', 'IWM', 'XLK', 'XLF', 'XLE', '^VIX', '^TNX'
+    ])
+    optional_universe: list[str] = Field(default_factory=lambda: ['GC=F', 'CL=F'])
+    include_optional_assets: bool = Field(default_factory=lambda: os.getenv("INCLUDE_OPTIONAL_ASSETS", "true").lower() == "true")
+    tickers: list[str] = Field(default_factory=list)
+
+    base_feature_columns: list[str] = Field(default_factory=lambda: [
+        "adj_return_1d", "adj_return_5d", "rolling_vol_10", "rolling_vol_20",
+        "momentum_20_z", "momentum_60_z", "vix_level", "vix_change",
+        "tnx_yield", "commodity_gc_ret", "commodity_cl_ret",
+        "cross_spy_qqq_spread", "cross_spy_iwm_spread"
     ])
 
     @field_validator("train_ratio", "val_ratio", "test_ratio")
@@ -85,6 +111,23 @@ class DataConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_splits(self):
+        # Ensure stable universe defaults if user did not provide a custom list
+        if not self.tickers:
+            combined = list(dict.fromkeys(self.base_universe + (self.optional_universe if self.include_optional_assets else [])))
+            self.tickers = combined
+
+        # Normalize common aliases to caret-based symbols
+        alias_map = {
+            "VIX": "^VIX",
+            "TNX": "^TNX",
+            "^TNX": "^TNX",
+            "^VIX": "^VIX",
+        }
+        normalized: list[str] = []
+        for t in self.tickers:
+            normalized.append(alias_map.get(t, t))
+        self.tickers = list(dict.fromkeys(normalized))
+
         total = self.train_ratio + self.val_ratio + self.test_ratio
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"train+val+test ratios must sum to 1.0 (got {total:.4f})")
@@ -130,9 +173,7 @@ class TrainingConfig(BaseModel):
     lambda_langevin: float = Field(default_factory=lambda: float(os.getenv("LAMBDA_LANGEVIN", "0.1")))
 
     # Device
-    device: Literal["cuda", "cpu"] = Field(
-        default_factory=lambda: os.getenv("DEVICE", "cuda")
-    )
+    device: str = Field(default_factory=lambda: os.getenv("DEVICE", "cuda"))
 
     # Reproducibility
     random_seed: int = Field(default_factory=lambda: int(os.getenv("RANDOM_SEED", "42")))
@@ -286,8 +327,13 @@ class Config(BaseModel):
         self.checkpoint_dir.mkdir(exist_ok=True)
         self.log_dir.mkdir(exist_ok=True)
         (self.data_dir / "raw").mkdir(exist_ok=True)
+        (self.data_dir / "raw_cache").mkdir(exist_ok=True)
         (self.data_dir / "processed").mkdir(exist_ok=True)
         (self.data_dir / "parquet").mkdir(exist_ok=True)
+        (self.data_dir / "splits").mkdir(exist_ok=True)
+        (self.data_dir / "artifacts").mkdir(exist_ok=True)
+        (self.data_dir / self.data.cache_dir).mkdir(parents=True, exist_ok=True)
+        (self.project_root / self.data.cache_dir).mkdir(parents=True, exist_ok=True)
 
 
 # Global config instance

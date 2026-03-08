@@ -136,19 +136,35 @@ class TrainingConfig:
 @dataclass
 class DataConfig:
     """Data pipeline configuration"""
-    tickers: List[str] = field(default_factory=lambda: ["AAPL"])
-    start_date: str = "2015-01-01"
-    end_date: str = "2024-01-01"
+    # Universe and calendar
+    universe_name: str = "core_multi_asset"
+    base_universe: List[str] = field(default_factory=lambda: ["SPY", "QQQ", "IWM", "XLK", "XLF", "XLE", "^VIX", "^TNX"])
+    optional_universe: List[str] = field(default_factory=lambda: ["GC=F", "CL=F"])
+    include_optional_assets: bool = True
+    tickers: List[str] = field(default_factory=list)
+    start_date: str = "2005-01-01"
+    end_date: str = "2025-12-31"
+    interval: str = "1d"
+    calendar: str = "NYSE"
+    master_calendar_holidays: Optional[List[str]] = None
+
+    # Target specification
+    target_symbol: str = "SPY"
+    target_type: str = "next_day_log_return"  # next_day_log_return | realized_vol | custom | joint_return_vol
+    target_column: str = "target"
+    target_vol_window: int = 5
 
     # Sequence parameters
-    sequence_length: int = 30
+    sequence_length: int = 60
     forecast_horizon: int = 1
 
     # Features
-    feature_columns: List[str] = field(default_factory=lambda: [
-        "close", "volume", "log_return", "rolling_volatility_20", "rsi_14"
+    base_feature_columns: List[str] = field(default_factory=lambda: [
+        "adj_return_1d", "adj_return_5d", "rolling_vol_10", "rolling_vol_20", "momentum_20_z", "momentum_60_z",
+        "vix_level", "vix_change", "tnx_yield", "commodity_gc_ret", "commodity_cl_ret",
+        "cross_spy_qqq_spread", "cross_spy_iwm_spread"
     ])
-    target_column: str = "close"
+    feature_columns: List[str] = field(default_factory=list)
 
     # Splits
     train_ratio: float = 0.7
@@ -157,6 +173,7 @@ class DataConfig:
 
     # Normalization
     normalization: str = "standard"  # standard, minmax, none
+    fit_scaler_on: str = "train"      # train only
 
     # Walk-forward
     window_strategy: str = "expanding"
@@ -164,6 +181,23 @@ class DataConfig:
     window_test_size: int = 21    # 1 month
     window_step_size: int = 21    # Monthly retraining
     n_folds: int = 5
+
+    # Caching
+    cache_dir: str = "cache"
+    force_refresh: bool = False
+    cache_ttl_days: int = 3
+
+    # Calendar/fill policy
+    default_forward_fill_limit: int = 1
+    per_symbol_forward_fill_limit: Dict[str, int] = field(default_factory=lambda: {"^VIX": 0, "^TNX": 0})
+
+    def __post_init__(self):
+        if not self.tickers:
+            merged = list(dict.fromkeys(self.base_universe + (self.optional_universe if self.include_optional_assets else [])))
+            self.tickers = merged
+
+        alias_map = {"VIX": "^VIX", "TNX": "^TNX", "^TNX": "^TNX", "^VIX": "^VIX"}
+        self.tickers = list(dict.fromkeys([alias_map.get(t, t) for t in self.tickers]))
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

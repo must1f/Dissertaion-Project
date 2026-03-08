@@ -28,7 +28,64 @@ ablations:
       model:
         pde_terms: ["data", "gbm", "ou", "bs"]
 
+  single_vs_multi_asset:
+    description: "Single SPY asset versus multi-asset benchmark universe"
+    baseline:
+      data:
+        universe_name: core_multi_asset
+        tickers: ['SPY', 'QQQ', 'IWM', 'XLK', 'XLF', 'XLE', '^VIX', '^TNX', 'GC=F', 'CL=F']
+    treatment:
+      data:
+        universe_name: single_asset_spy
+        tickers: ['SPY']
+
+  raw_vs_adjusted_close:
+    description: "Adjusted close (leakage-safe) versus raw close target/feature column"
+    baseline:
+      data:
+        price_column: adjusted_close
+    treatment:
+      data:
+        price_column: close
+
+  with_without_vix_rates:
+    description: "Feature ablation removing VIX and rates overlays"
+    baseline:
+      data:
+        tickers: ['SPY', 'QQQ', 'IWM', 'XLK', 'XLF', 'XLE', '^VIX', '^TNX', 'GC=F', 'CL=F']
+    treatment:
+      data:
+        tickers: ['SPY', 'QQQ', 'IWM', 'XLK', 'XLF', 'XLE']
+        base_feature_columns:
+          - adj_return_1d
+          - adj_return_5d
+          - rolling_vol_10
+          - rolling_vol_20
+          - momentum_20_z
+          - momentum_60_z
+          - cross_spy_qqq_spread
+          - cross_spy_iwm_spread
+
+  leakage_safe_vs_improper:
+    description: "Train-only scaling with forward-fill versus full-dataset scaler with backfill"
+    baseline:
+      data:
+        missing_policy: leakage_safe
+        scaling_policy: train_only
+    treatment:
+      data:
+        missing_policy: improper_backfill
+        scaling_policy: full_dataset
+
+  qa_filtering_vs_none:
+    description: "QA gates enforced versus QA disabled"
+    baseline:
+      data:
+        disable_qa: false
+    treatment:
+      data:
+        disable_qa: true
+
 defaults:
   seeds: [42, 43, 44]
   output_dir: "outputs/ablations"
-
